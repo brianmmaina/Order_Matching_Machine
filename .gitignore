@@ -1,0 +1,19 @@
+build/
+cmake-build-*/
+out/
+
+compile_commands.json
+
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+Testing/
+
+.vs/
+.idea/
+*.swp
+.DS_Store
+
+# LOBSTER CSVs / archives (large; download locally — see data/lobster/README.md)
+data/lobster/**/*.csv
+data/lobster/**/*.7z
