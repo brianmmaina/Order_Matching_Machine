@@ -2,7 +2,7 @@
 
 Limit-order **book**, **matching engine**, and **LOBSTER** (NASDAQ-style) CSV replay/validation. **Command-line only** — no web or desktop UI.
 
-**First C++ project** — I’m still learning idioms, tooling, and the tradeoffs below; the code is a learning sandbox, not battle-tested infra.
+**First C++ project**: I’m still learning idioms, tooling, and the tradeoffs below so the code is a learning sandbox, not battle-tested infra.
 
 Good for showing **systems-style C++**, **CMake**, **tests**, and **real market data** ingestion — not a production exchange stack.
 
@@ -75,7 +75,7 @@ LOBSTER replay treats executions as **reducing the passive side** at the event p
 
 ## What I want to improve next
 
-Ideas I’m curious to tackle — feedback welcome.
+Ideas I’m curious to tackle, open to any feedback.
 
 - **LOBSTER / realism** — Tighter parity with the official reconstruction (order-level state across the file window, partial cancels when IDs aren’t in the book, cross/auction messages, hidden liquidity edge cases). Maybe golden checks **per event** instead of only an end snapshot.
 - **Hardening** — `clang-tidy` / `clang-format`, **ASan/UBSan** in CI, `-Werror` cleanup, stricter parsing error reporting.
