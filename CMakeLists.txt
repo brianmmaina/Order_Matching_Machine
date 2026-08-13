@@ -39,7 +39,12 @@ if(BUILD_TESTING)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
 
-  add_executable(tests tests/order_book_test.cpp)
+  add_executable(tests
+    tests/test_order_book.cpp
+    tests/test_matching.cpp
+    tests/test_lobster.cpp
+    tests/test_spsc.cpp
+  )
   target_link_libraries(tests PRIVATE order_book GTest::gtest_main)
 
   include(GoogleTest)
