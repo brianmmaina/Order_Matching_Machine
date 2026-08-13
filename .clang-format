@@ -1,0 +1,26 @@
+# matches the style already in the tree: 4-space indent, 100 columns,
+# attached braces. added in session 0.1 as a config only — the repo is
+# deliberately NOT reformatted wholesale, so history stays readable.
+# run `clang-format -i` on files you are already editing.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+
+BreakBeforeBraces: Attach
+PointerAlignment: Left
+SpacesBeforeTrailingComments: 2
+
+# keep our own headers grouped after system/third-party ones, which is the
+# order the existing sources already use.
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
