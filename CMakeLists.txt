@@ -6,9 +6,43 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# a build with no explicit type gets no optimization flags at all, which quietly
+# makes every benchmark number meaningless. default to release; -DCMAKE_BUILD_TYPE
+# still overrides. only applies to single-config generators (make/ninja).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
 option(ORDER_BOOK_EXPORT_COMPILE_COMMANDS "Generate compile_commands.json" ON)
 if(ORDER_BOOK_EXPORT_COMPILE_COMMANDS)
   set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
+# warnings live on an INTERFACE target rather than global add_compile_options so
+# they apply to our code only. googletest is fetched as source and built in this
+# tree; -Werror on third-party code means their warnings break our build.
+add_library(ome_warnings INTERFACE)
+target_compile_options(ome_warnings INTERFACE
+  -Wall -Wextra -Werror
+  -Wshadow            # a local shadowing a member is how "why didn't that assignment stick" bugs happen
+  -Wconversion        # implicit narrowing matters once prices/quantities are fixed-width
+  -Wsign-conversion
+)
+
+# OME_SANITIZE: "", "address", "undefined", "address,undefined", or "thread".
+# sanitizers must instrument every translation unit AND the link step, so unlike
+# warnings these go on globally — including googletest, which is correct: an
+# uninstrumented library linked into an asan binary reports false negatives.
+set(OME_SANITIZE "" CACHE STRING "Sanitizers: address, undefined, address,undefined, or thread")
+if(OME_SANITIZE)
+  # tsan maintains its own shadow memory layout and cannot coexist with asan.
+  if(OME_SANITIZE MATCHES "thread" AND OME_SANITIZE MATCHES "address")
+    message(FATAL_ERROR "OME_SANITIZE: thread and address are mutually exclusive")
+  endif()
+  add_compile_options(-fsanitize=${OME_SANITIZE} -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=${OME_SANITIZE})
+  message(STATUS "sanitizers enabled: ${OME_SANITIZE}")
 endif()
 
 add_library(order_book STATIC
@@ -21,12 +55,14 @@ add_library(order_book STATIC
 target_include_directories(order_book PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+# PRIVATE: consumers of order_book inherit its headers, not its warning flags.
+target_link_libraries(order_book PRIVATE ome_warnings)
 
 add_executable(main src/main.cpp)
-target_link_libraries(main PRIVATE order_book)
+target_link_libraries(main PRIVATE order_book ome_warnings)
 
 add_executable(lobster_replay src/lobster_replay.cpp)
-target_link_libraries(lobster_replay PRIVATE order_book)
+target_link_libraries(lobster_replay PRIVATE order_book ome_warnings)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -45,7 +81,7 @@ if(BUILD_TESTING)
     tests/test_lobster.cpp
     tests/test_spsc.cpp
   )
-  target_link_libraries(tests PRIVATE order_book GTest::gtest_main)
+  target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main)
 
   include(GoogleTest)
   gtest_discover_tests(tests)
