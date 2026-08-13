@@ -195,8 +195,11 @@ bool parse_row(const std::vector<std::string>& fields, Order& out) {
 }
 
 bool line_all_whitespace(const std::string& line) {
-    for (unsigned char c : line) {
-        if (!std::isspace(c)) {
+    for (const char ch : line) {
+        // std::isspace takes an int that must be representable as unsigned char (or EOF);
+        // passing a negative char is UB, so widen through unsigned char explicitly rather
+        // than letting the char->unsigned char conversion happen implicitly.
+        if (!std::isspace(static_cast<unsigned char>(ch))) {
             return false;
         }
     }
