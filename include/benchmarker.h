@@ -66,7 +66,10 @@ private:
             return 0;
         }
         const std::size_t n = sorted.size();
-        const std::size_t idx = static_cast<std::size_t>((n - 1U) * q);
+        // explicit widen to double before scaling: size_t -> double is lossy above 2^53,
+        // which we will never reach here, but the conversion should be intentional rather
+        // than implicit. index truncates toward zero (nearest-rank percentile).
+        const std::size_t idx = static_cast<std::size_t>(static_cast<double>(n - 1U) * q);
         return sorted[idx];
     }
 
