@@ -75,13 +75,18 @@ if(BUILD_TESTING)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
 
+  # the concurrent SPSC test spawns a thread; libstdc++ needs -pthread for that,
+  # libc++ on macOS does not. Threads::Threads papers over the difference.
+  find_package(Threads REQUIRED)
+
   add_executable(tests
     tests/test_order_book.cpp
     tests/test_matching.cpp
     tests/test_lobster.cpp
     tests/test_spsc.cpp
+    tests/test_reject_reason.cpp
   )
-  target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main)
+  target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main Threads::Threads)
 
   include(GoogleTest)
   gtest_discover_tests(tests)
