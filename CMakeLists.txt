@@ -85,6 +85,7 @@ if(BUILD_TESTING)
     tests/test_lobster.cpp
     tests/test_spsc.cpp
     tests/test_reject_reason.cpp
+    tests/test_protocol.cpp
   )
   target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main Threads::Threads)
 
