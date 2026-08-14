@@ -18,7 +18,8 @@ namespace order_book {
 
 // one price level: key price plus time-priority fifo of resting orders.
 struct PriceLevel {
-    double price{};
+    // integer ticks; level identity is exact equality on this field.
+    std::int64_t price_ticks{};
     std::deque<Order> orders;
 };
 
@@ -47,11 +48,12 @@ public:
 
     // LOBSTER types 4/5: remove traded_size from passive side at price (FIFO within the level).
     // Missing level or insufficient size returns false; missing level may be a no-op if allow_missing_level.
-    [[nodiscard]] bool reduce_level_after_lobster_execution(Order::Side passive_side, double price,
+    [[nodiscard]] bool reduce_level_after_lobster_execution(Order::Side passive_side,
+                                                           std::int64_t price_ticks,
                                                            uint32_t traded_size,
                                                            bool allow_missing_level = false);
 
-    // aggregated sizes per price level, best levels first; prices rounded to lobster ticks.
+    // aggregated sizes per price level, best levels first. prices are already ticks.
     [[nodiscard]] std::vector<std::pair<std::int64_t, std::uint64_t>> bid_levels_ticks(
         std::size_t max_levels) const;
     [[nodiscard]] std::vector<std::pair<std::int64_t, std::uint64_t>> ask_levels_ticks(
@@ -62,7 +64,7 @@ private:
     std::vector<PriceLevel> bids_;
     std::vector<PriceLevel> asks_;
     // std::pair in map value: side + price to locate level for cancel without scanning all levels.
-    std::unordered_map<uint64_t, std::pair<Order::Side, double>> order_loc_;
+    std::unordered_map<uint64_t, std::pair<Order::Side, std::int64_t>> order_loc_;
 };
 
 }  // namespace order_book

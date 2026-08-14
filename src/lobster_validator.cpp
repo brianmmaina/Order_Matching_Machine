@@ -11,11 +11,11 @@
 #include "lobster/lobster_message.hpp"
 #include "lobster/lobster_parser.hpp"
 #include "matching_engine/matching_engine.hpp"
+#include "ome/book_jsonl.hpp"
 #include "order.h"
 
 namespace {
 
-constexpr double kTickScale = 10000.0;
 
 struct SnapshotLevel {
     int64_t price_ticks{};
@@ -96,7 +96,7 @@ void apply_message(MatchingEngine& eng, const LobsterMessage& m) {
         case 1: {
             Order o{};
             o.id = m.order_id;
-            o.price = static_cast<double>(m.price_ticks) / kTickScale;
+            o.price_ticks = m.price_ticks;
             o.quantity = m.size;
             o.side = (m.direction == 1) ? Order::BID : Order::ASK;
             o.type = Order::LIMIT;
@@ -114,16 +114,16 @@ void apply_message(MatchingEngine& eng, const LobsterMessage& m) {
             }
             // LOBSTER row may reference liquidity from before the file; drop size at price on that side.
             const Order::Side side = (m.direction == 1) ? Order::BID : Order::ASK;
-            const double px = static_cast<double>(m.price_ticks) / kTickScale;
-            static_cast<void>(eng.book().reduce_level_after_lobster_execution(side, px, m.size, true));
+            static_cast<void>(
+                eng.book().reduce_level_after_lobster_execution(side, m.price_ticks, m.size, true));
             break;
         }
         case 4:
         case 5: {
             // LOBSTER: direction is the resting limit's side (1 = buy/bid, -1 = sell/ask).
             const Order::Side passive = (m.direction == 1) ? Order::BID : Order::ASK;
-            const double px = static_cast<double>(m.price_ticks) / kTickScale;
-            static_cast<void>(eng.book().reduce_level_after_lobster_execution(passive, px, m.size, true));
+            static_cast<void>(
+                eng.book().reduce_level_after_lobster_execution(passive, m.price_ticks, m.size, true));
             break;
         }
         case 7:
@@ -178,7 +178,7 @@ bool seed_book_from_snapshot(std::istream& in, MatchingEngine& eng, std::ostring
         }
         Order o{};
         o.id = synth--;
-        o.price = static_cast<double>(snap_bids[i].price_ticks) / kTickScale;
+        o.price_ticks = snap_bids[i].price_ticks;
         o.quantity = static_cast<std::uint32_t>(sz64);
         o.side = Order::BID;
         o.type = Order::LIMIT;
@@ -196,7 +196,7 @@ bool seed_book_from_snapshot(std::istream& in, MatchingEngine& eng, std::ostring
         }
         Order o{};
         o.id = synth--;
-        o.price = static_cast<double>(snap_asks[i].price_ticks) / kTickScale;
+        o.price_ticks = snap_asks[i].price_ticks;
         o.quantity = static_cast<std::uint32_t>(sz64);
         o.side = Order::ASK;
         o.type = Order::LIMIT;
@@ -220,7 +220,8 @@ std::string LobsterValidator::Result::summary() const {
 }
 
 LobsterValidator::Result LobsterValidator::validate(std::istream& messages, std::istream& snapshot,
-                                                    std::size_t n_events, std::istream* snapshot_initial) {
+                                                    std::size_t n_events, std::istream* snapshot_initial,
+                                                    std::ostream* jsonl_out) {
     Result r{};
     std::ostringstream log_stream;
 
@@ -253,6 +254,12 @@ LobsterValidator::Result LobsterValidator::validate(std::istream& messages, std:
     }
     for (std::size_t i = first_msg; i < use_n; ++i) {
         apply_message(engine, all[i]);
+        if (jsonl_out != nullptr) {
+            // LOBSTER timestamps are microseconds since midnight; the record format is ns.
+            const std::uint64_t t_ns = all[i].timestamp_us * 1000ULL;
+            ome::write_book_record(*jsonl_out, t_ns, i, engine.book().bid_levels_ticks(10),
+                                   engine.book().ask_levels_ticks(10));
+        }
     }
 
     const auto our_bids = engine.book().bid_levels_ticks(10);

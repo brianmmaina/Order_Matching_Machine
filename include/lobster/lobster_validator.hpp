@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <istream>
 #include <optional>
+#include <ostream>
 #include <string>
 
 // replays lobster messages through MatchingEngine, then compares aggregated top-10 bid/ask
@@ -25,6 +26,10 @@ public:
     // price_ticks,size (comments with # skipped). empty/malformed snapshot rows treated as 0 size.
     // If snapshot_initial is set, it must match LOBSTER orderbook row 0 (state after message 0);
     // replay applies messages 1..n_events-1 on that seed (LOBSTER row indexing).
+    // If jsonl_out is set, one book snapshot record (see include/ome/book_jsonl.hpp) is written
+    // per applied message. Emitting from inside the replay loop rather than re-running it keeps
+    // the visualized book and the validated book the same book.
     [[nodiscard]] static Result validate(std::istream& messages, std::istream& snapshot, std::size_t n_events,
-                                        std::istream* snapshot_initial = nullptr);
+                                        std::istream* snapshot_initial = nullptr,
+                                        std::ostream* jsonl_out = nullptr);
 };
