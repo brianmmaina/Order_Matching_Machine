@@ -33,13 +33,12 @@ jobs:
       - name: test
         run: ctest --test-dir build --output-on-failure
 
-  # gcc diagnoses a different set than clang under -Wconversion/-Wshadow, and the
-  # project has no gcc toolchain to iterate against locally. non-blocking on
-  # purpose: it surfaces findings to fix deliberately rather than turning main red
-  # on a warning nobody can reproduce. promote to blocking once it is clean.
+  # gcc diagnoses a different set than clang under -Wconversion/-Wshadow, and there
+  # is no gcc toolchain on the dev machine to iterate against. it started
+  # non-blocking for that reason; its one finding (-Wcomment) is fixed, so it
+  # blocks now — a second compiler is only worth having if it can fail the build.
   gcc:
     runs-on: ubuntu-latest
-    continue-on-error: true
     env:
       CC: gcc
       CXX: g++
