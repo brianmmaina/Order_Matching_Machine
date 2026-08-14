@@ -12,7 +12,7 @@
 TEST(SpscQueue, push_pop_roundtrip_single_thread) {
     // one thread acting as both roles is allowed for testing; real spsc uses one thread per role.
     SpscQueue<4> q;
-    Order o = Order::make(1.0, 2, Order::BID, Order::LIMIT, 9);
+    Order o = Order::make(10000, 2, Order::BID, Order::LIMIT, 9);
     const uint64_t id = o.id;
     EXPECT_TRUE(q.push(std::move(o)));
     auto out = q.pop();
@@ -23,7 +23,7 @@ TEST(SpscQueue, push_pop_roundtrip_single_thread) {
 
 TEST(SpscQueue, full_rejects_push) {
     SpscQueue<2> q;
-    EXPECT_TRUE(q.push(Order::make(1.0, 1, Order::BID, Order::LIMIT, 1)));
-    EXPECT_TRUE(q.push(Order::make(2.0, 1, Order::BID, Order::LIMIT, 2)));
-    EXPECT_FALSE(q.push(Order::make(3.0, 1, Order::BID, Order::LIMIT, 3)));
+    EXPECT_TRUE(q.push(Order::make(10000, 1, Order::BID, Order::LIMIT, 1)));
+    EXPECT_TRUE(q.push(Order::make(20000, 1, Order::BID, Order::LIMIT, 2)));
+    EXPECT_FALSE(q.push(Order::make(30000, 1, Order::BID, Order::LIMIT, 3)));
 }

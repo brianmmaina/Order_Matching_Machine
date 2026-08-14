@@ -8,10 +8,10 @@
 #include "trade.h"
 
 TEST(Order, make_auto_increments_id) {
-    const auto a = Order::make(10.0, 100, Order::BID, Order::LIMIT, 1);
-    const auto b = Order::make(10.5, 50, Order::ASK, Order::MARKET, 2);
+    const auto a = Order::make(100000, 100, Order::BID, Order::LIMIT, 1);
+    const auto b = Order::make(105000, 50, Order::ASK, Order::MARKET, 2);
     EXPECT_EQ(a.id + 1, b.id);
-    EXPECT_DOUBLE_EQ(a.price, 10.0);
+    EXPECT_EQ(a.price_ticks, 100000);
     EXPECT_EQ(a.quantity, 100u);
     EXPECT_EQ(a.side, Order::BID);
     EXPECT_EQ(a.type, Order::LIMIT);
@@ -20,7 +20,7 @@ TEST(Order, make_auto_increments_id) {
 
 TEST(OrderBook, add_limit_resting_and_cancel) {
     order_book::OrderBook book;
-    auto bid = Order::make(100.0, 10, Order::BID, Order::LIMIT, 1);
+    auto bid = Order::make(1000000, 10, Order::BID, Order::LIMIT, 1);
     const uint64_t bid_id = bid.id;
     book.addOrder(std::move(bid));
     EXPECT_TRUE(book.cancelOrder(bid_id));
@@ -29,7 +29,7 @@ TEST(OrderBook, add_limit_resting_and_cancel) {
 
 TEST(OrderBook, non_limit_types_do_not_rest) {
     order_book::OrderBook book;
-    auto m = Order::make(50.0, 1, Order::BID, Order::MARKET, 1);
+    auto m = Order::make(500000, 1, Order::BID, Order::MARKET, 1);
     const uint64_t id = m.id;
     book.addOrder(std::move(m));
     EXPECT_FALSE(book.cancelOrder(id));
@@ -37,8 +37,8 @@ TEST(OrderBook, non_limit_types_do_not_rest) {
 
 TEST(OrderBook, cancel_second_order_at_same_price_level) {
     order_book::OrderBook book;
-    auto a = Order::make(200.0, 1, Order::ASK, Order::LIMIT, 1);
-    auto b = Order::make(200.0, 2, Order::ASK, Order::LIMIT, 2);
+    auto a = Order::make(2000000, 1, Order::ASK, Order::LIMIT, 1);
+    auto b = Order::make(2000000, 2, Order::ASK, Order::LIMIT, 2);
     const uint64_t id_a = a.id;
     const uint64_t id_b = b.id;
     book.addOrder(std::move(a));
@@ -49,8 +49,8 @@ TEST(OrderBook, cancel_second_order_at_same_price_level) {
 
 TEST(OrderBook, execute_top_cross_not_crossed) {
     order_book::OrderBook book;
-    book.addOrder(Order::make(100.0, 1, Order::ASK, Order::LIMIT, 1));
-    book.addOrder(Order::make(99.0, 1, Order::BID, Order::LIMIT, 2));
+    book.addOrder(Order::make(1000000, 1, Order::ASK, Order::LIMIT, 1));
+    book.addOrder(Order::make(990000, 1, Order::BID, Order::LIMIT, 2));
     EXPECT_FALSE(book.is_crossed());
     Trade t{};
     EXPECT_FALSE(book.execute_top_cross(t));
