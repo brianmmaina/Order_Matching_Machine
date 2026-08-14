@@ -4,10 +4,12 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "benchmarker.h"
 #include "matching_engine/matching_engine.hpp"
+#include "ome/reject_reason.hpp"
 #include "order.h"
 #include "trade.h"
 
@@ -87,6 +89,106 @@ TEST(MatchingEngine, market_walks_prices_partial_liquidity_and_cancel) {
 
     eng.processOrder(Order::make(0, 5, Order::ASK, Order::MARKET, 20));
     EXPECT_EQ(eng.trade_log().size(), n_after_cancel);
+}
+
+// --- ApplyResult: what the gateway needs back from an apply -----------------
+
+TEST(ApplyResult, resting_limit_is_accepted_and_unfilled) {
+    MatchingEngine eng;
+    const ApplyResult r = eng.processOrder(Order::make(1000000, 10, Order::BID, Order::LIMIT, 1));
+    EXPECT_TRUE(r.accepted);
+    EXPECT_EQ(r.reason, ome::RejectReason::NONE);
+    EXPECT_EQ(r.filled_qty, 0u);
+    EXPECT_FALSE(r.fully_filled);
+}
+
+TEST(ApplyResult, marketable_limit_reports_partial_and_full_fills) {
+    MatchingEngine eng;
+    eng.processOrder(Order::make(1000000, 4, Order::ASK, Order::LIMIT, 1));
+
+    // takes all 4 resting, 6 of its 10 rest: partial.
+    const ApplyResult partial =
+        eng.processOrder(Order::make(1010000, 10, Order::BID, Order::LIMIT, 2));
+    EXPECT_TRUE(partial.accepted);
+    EXPECT_EQ(partial.filled_qty, 4u);
+    EXPECT_FALSE(partial.fully_filled);
+
+    // hits the 6 now resting on the bid: full.
+    const ApplyResult full = eng.processOrder(Order::make(1000000, 6, Order::ASK, Order::LIMIT, 3));
+    EXPECT_TRUE(full.accepted);
+    EXPECT_EQ(full.filled_qty, 6u);
+    EXPECT_TRUE(full.fully_filled);
+}
+
+TEST(ApplyResult, cancel_of_unknown_id_is_rejected_with_reason) {
+    MatchingEngine eng;
+    Order cancel{};
+    cancel.id = 987654;
+    cancel.type = Order::CANCEL;
+
+    const ApplyResult r = eng.processOrder(cancel);
+    EXPECT_FALSE(r.accepted);
+    EXPECT_EQ(r.reason, ome::RejectReason::UNKNOWN_ORDER);
+}
+
+TEST(ApplyResult, cancel_of_resting_order_is_accepted) {
+    MatchingEngine eng;
+    auto bid = Order::make(1000000, 10, Order::BID, Order::LIMIT, 1);
+    const uint64_t id = bid.id;
+    eng.processOrder(std::move(bid));
+
+    Order cancel{};
+    cancel.id = id;
+    cancel.type = Order::CANCEL;
+
+    const ApplyResult r = eng.processOrder(cancel);
+    EXPECT_TRUE(r.accepted);
+    EXPECT_EQ(r.reason, ome::RejectReason::NONE);
+}
+
+TEST(ApplyResult, market_order_reports_what_it_actually_took) {
+    MatchingEngine eng;
+    eng.processOrder(Order::make(1000000, 3, Order::ASK, Order::LIMIT, 1));
+
+    // asks for 10 against 3 of liquidity; the remainder is dropped, not rested,
+    // so the order is done regardless.
+    const ApplyResult r = eng.processOrder(Order::make(0, 10, Order::BID, Order::MARKET, 2));
+    EXPECT_TRUE(r.accepted);
+    EXPECT_EQ(r.filled_qty, 3u);
+    EXPECT_TRUE(r.fully_filled);
+}
+
+// --- trade drain: reading the trades one command produced -------------------
+
+TEST(MatchingEngine, trade_log_slice_isolates_one_command) {
+    MatchingEngine eng;
+    eng.processOrder(Order::make(1000000, 5, Order::ASK, Order::LIMIT, 1));
+    eng.processOrder(Order::make(1010000, 5, Order::ASK, Order::LIMIT, 2));
+
+    // sweeps both levels: this one command should yield exactly two trades.
+    const std::size_t before = eng.trade_log_size();
+    eng.processOrder(Order::make(0, 10, Order::BID, Order::MARKET, 3));
+    const std::size_t after = eng.trade_log_size();
+
+    ASSERT_EQ(after - before, 2u);
+    EXPECT_EQ(eng.trade_log()[before].price_ticks, 1000000);
+    EXPECT_EQ(eng.trade_log()[before + 1].price_ticks, 1010000);
+}
+
+TEST(MatchingEngine, clear_trade_log_bounds_growth_without_touching_the_book) {
+    MatchingEngine eng;
+    eng.processOrder(Order::make(1000000, 5, Order::ASK, Order::LIMIT, 1));
+    eng.processOrder(Order::make(1010000, 5, Order::BID, Order::LIMIT, 2));
+    ASSERT_GT(eng.trade_log_size(), 0u);
+
+    eng.clear_trade_log();
+    EXPECT_EQ(eng.trade_log_size(), 0u);
+
+    // clearing the log must not disturb resting liquidity — the 5 that crossed
+    // are gone, but the book still functions and keeps producing trades.
+    eng.processOrder(Order::make(1010000, 3, Order::ASK, Order::LIMIT, 3));
+    eng.processOrder(Order::make(1010000, 3, Order::BID, Order::LIMIT, 4));
+    EXPECT_GT(eng.trade_log_size(), 0u);
 }
 
 TEST(Benchmarker, latency_and_throughput_smoke) {
