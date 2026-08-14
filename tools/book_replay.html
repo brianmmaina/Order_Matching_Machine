@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Book Replay</title>
+<!--
+  Order book replay visualizer.
+
+  Consumes the JSONL book snapshot format defined in include/ome/book_jsonl.hpp:
+
+    {"t":<u64 ns>,"seq":<u64>,"bids":[[<i64 ticks>,<u64 qty>],...],
+                              "asks":[[<i64 ticks>,<u64 qty>],...]}
+
+  One object per line. bids descending by price, asks ascending, depth <= 10.
+  Prices are INTEGER TICKS. Display divides by TICKS_PER_UNIT for readability;
+  no arithmetic is ever done on the displayed value.
+
+  Producers:
+    file replay  ./build/lobster_replay ... --jsonl out.jsonl
+    live service tools/live_feed.py (session 1.6)
+
+  Both emit byte-identical records, so this page needs no knowledge of which
+  one it is reading. Deliberately dependency-free: no CDN, no build step, opens
+  from the filesystem.
+-->
+<style>
+  :root {
+    --bg: #12121a;
+    --panel: #1b1b26;
+    --line: #2c2c3a;
+    --fg: #e8e8f0;
+    --dim: #8a8a9e;
+    --bid: #2ea36b;
+    --ask: #d0455b;
+    --accent: #5b8dd6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 15px; margin: 0 0 12px; letter-spacing: .08em; text-transform: uppercase; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line);
+    padding: 10px 12px; margin-bottom: 14px;
+  }
+  button, select {
+    font: inherit; color: var(--fg); background: #262633;
+    border: 1px solid var(--line); padding: 5px 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled), select:hover { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  input[type=range] { flex: 1; min-width: 180px; accent-color: var(--accent); }
+  .meta { color: var(--dim); white-space: nowrap; }
+  .meta b { color: var(--fg); font-weight: 600; }
+
+  .books { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 620px) { .books { grid-template-columns: 1fr; } }
+  .side { background: var(--panel); border: 1px solid var(--line); }
+  .side h2 {
+    font-size: 11px; margin: 0; padding: 7px 10px; letter-spacing: .12em;
+    text-transform: uppercase; border-bottom: 1px solid var(--line); color: var(--dim);
+  }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 3px 10px; font-variant-numeric: tabular-nums; }
+  .px { width: 38%; }
+  .qty { width: 24%; text-align: right; color: var(--dim); }
+  .bar { width: 38%; padding-left: 0; }
+  .bar i { display: block; height: 11px; }
+  .bids .px { color: var(--bid); }
+  .bids .bar i { background: var(--bid); opacity: .45; }
+  .asks .px { color: var(--ask); }
+  .asks .bar i { background: var(--ask); opacity: .45; }
+  .empty { color: var(--dim); padding: 10px; }
+  .spread { text-align: center; color: var(--dim); margin: 10px 0 0; }
+  .drop { border: 1px dashed var(--line); padding: 26px; text-align: center; color: var(--dim); }
+</style>
+</head>
+<body>
+
+<h1>Order Book Replay</h1>
+
+<div class="controls">
+  <input type="file" id="file" accept=".jsonl,.json,.txt">
+  <button id="play" disabled>Play</button>
+  <button id="step" disabled>Step</button>
+  <select id="speed">
+    <option value="120">slow</option>
+    <option value="40" selected>normal</option>
+    <option value="8">fast</option>
+    <option value="0">max</option>
+  </select>
+  <input type="range" id="scrub" min="0" max="0" value="0" disabled>
+  <span class="meta" id="pos">no data</span>
+</div>
+
+<div id="drop" class="drop">Choose a .jsonl file, or drop one here.</div>
+
+<div class="books" id="books" hidden>
+  <div class="side bids">
+    <h2>Bids</h2>
+    <table id="bids"></table>
+  </div>
+  <div class="side asks">
+    <h2>Asks</h2>
+    <table id="asks"></table>
+  </div>
+</div>
+<p class="spread" id="spread"></p>
+
+<script>
+"use strict";
+
+// must match kTicksPerUnit on the producing side. display only — every
+// comparison and sort below operates on the raw integer ticks.
+const TICKS_PER_UNIT = 10000;
+
+const el = (id) => document.getElementById(id);
+let records = [];
+let idx = 0;
+let timer = null;
+
+function fmtPrice(ticks) {
+  return (ticks / TICKS_PER_UNIT).toFixed(4);
+}
+
+function renderSide(table, levels, maxQty) {
+  if (!levels.length) {
+    table.innerHTML = '<tr><td class="empty">empty</td></tr>';
+    return;
+  }
+  const rows = levels.map(([ticks, qty]) => {
+    const pct = maxQty > 0 ? (qty / maxQty) * 100 : 0;
+    return '<tr>' +
+      '<td class="px">' + fmtPrice(ticks) + '</td>' +
+      '<td class="qty">' + qty + '</td>' +
+      '<td class="bar"><i style="width:' + pct.toFixed(1) + '%"></i></td>' +
+      '</tr>';
+  });
+  table.innerHTML = rows.join('');
+}
+
+function render() {
+  const r = records[idx];
+  if (!r) return;
+  // one shared scale across both sides, so a deep bid stack visibly outweighs
+  // a thin ask stack instead of both rendering full-width.
+  const maxQty = Math.max(0, ...r.bids.map(l => l[1]), ...r.asks.map(l => l[1]));
+  renderSide(el('bids'), r.bids, maxQty);
+  renderSide(el('asks'), r.asks, maxQty);
+
+  const bestBid = r.bids.length ? r.bids[0][0] : null;
+  const bestAsk = r.asks.length ? r.asks[0][0] : null;
+  el('spread').textContent = (bestBid !== null && bestAsk !== null)
+    ? 'spread ' + fmtPrice(bestAsk - bestBid) + '   mid ' + fmtPrice((bestAsk + bestBid) / 2)
+    : 'spread —  (one side empty)';
+
+  el('pos').innerHTML = 'record <b>' + (idx + 1) + '</b> / ' + records.length +
+                        '   seq <b>' + r.seq + '</b>   t <b>' + r.t + '</b> ns';
+  el('scrub').value = String(idx);
+}
+
+function stop() {
+  if (timer !== null) { clearTimeout(timer); timer = null; }
+  el('play').textContent = 'Play';
+}
+
+function tick() {
+  if (idx >= records.length - 1) { stop(); return; }
+  idx++;
+  render();
+  const delay = Number(el('speed').value);
+  timer = setTimeout(tick, delay);
+}
+
+el('play').onclick = () => {
+  if (timer !== null) { stop(); return; }
+  if (idx >= records.length - 1) idx = 0;
+  el('play').textContent = 'Pause';
+  tick();
+};
+
+el('step').onclick = () => {
+  stop();
+  if (idx < records.length - 1) { idx++; render(); }
+};
+
+el('scrub').oninput = (e) => { stop(); idx = Number(e.target.value); render(); };
+
+function load(text) {
+  const bad = [];
+  records = text.split('\n')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map((line, i) => {
+      try {
+        const d = JSON.parse(line);
+        // a record missing either side is a producer bug; surface it rather
+        // than rendering an empty book and letting it look like quiet market.
+        if (!Array.isArray(d.bids) || !Array.isArray(d.asks)) throw new Error('missing bids/asks');
+        return d;
+      } catch (err) {
+        bad.push(i + 1);
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  stop();
+  idx = 0;
+  const ok = records.length > 0;
+  el('books').hidden = !ok;
+  el('drop').hidden = ok;
+  el('play').disabled = !ok;
+  el('step').disabled = !ok;
+  el('scrub').disabled = !ok;
+  el('scrub').max = String(Math.max(0, records.length - 1));
+
+  if (!ok) {
+    el('drop').textContent = 'No valid records found in that file.';
+    el('pos').textContent = 'no data';
+    return;
+  }
+  if (bad.length) {
+    console.warn('skipped ' + bad.length + ' malformed line(s), first at line ' + bad[0]);
+  }
+  render();
+}
+
+el('file').onchange = (e) => {
+  const f = e.target.files[0];
+  if (f) f.text().then(load);
+};
+
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f) f.text().then(load);
+});
+</script>
+</body>
+</html>
