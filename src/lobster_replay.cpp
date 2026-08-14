@@ -1,7 +1,10 @@
 // CLI: replay LOBSTER message csv and compare book to a row from LOBSTER orderbook file.
 // Example:
-//   ./build/lobster_replay --messages data/lobster/AMZN_..._message_10.csv \
-//     --orderbook data/lobster/AMZN_..._orderbook_10.csv --events 10000
+//   ./build/lobster_replay --messages data/lobster/AMZN_..._message_10.csv
+//                          --orderbook data/lobster/AMZN_..._orderbook_10.csv --events 10000
+//
+// (no trailing backslashes in these comments: a line continuation inside a //
+//  comment splices the next line into it, which -Wcomment rightly flags.)
 
 #include <cstdlib>
 #include <fstream>
@@ -17,10 +20,12 @@ namespace {
 void usage() {
     std::cerr
         << "usage: lobster_replay --messages <message.csv> --orderbook <orderbook.csv> --events N \\\n"
-        << "          [--orderbook-line L] [--seed-orderbook-zero]\n"
+        << "          [--orderbook-line L] [--seed-orderbook-zero] [--jsonl <out.jsonl>]\n"
         << "  replays the first N events from the message file, builds a reference snapshot from\n"
         << "  orderbook line L (0-based over non-empty non-comment lines). default L = N-1.\n"
-        << "  --seed-orderbook-zero: load LOBSTER orderbook row 0 then apply messages 1..N-1 (LOBSTER row sync).\n";
+        << "  --seed-orderbook-zero: load LOBSTER orderbook row 0 then apply messages 1..N-1 (LOBSTER row sync).\n"
+        << "  --jsonl: write one top-10 book snapshot record per applied message, for\n"
+        << "           tools/book_replay.html. Format: include/ome/book_jsonl.hpp\n";
 }
 
 bool has_flag(int argc, char** argv, const char* key) {
@@ -112,8 +117,30 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // opened before validate() so a bad path fails before we spend the replay.
+    std::string jsonl_path;
+    std::ofstream jsonl_file;
+    std::ostream* jsonl_out = nullptr;
+    if (get_str(argc, argv, "--jsonl", jsonl_path)) {
+        jsonl_file.open(jsonl_path, std::ios::out | std::ios::trunc);
+        if (!jsonl_file) {
+            std::cerr << "cannot open --jsonl output: " << jsonl_path << '\n';
+            return 1;
+        }
+        jsonl_out = &jsonl_file;
+    }
+
     std::istringstream snapshot_in(snap.str());
-    const auto result = LobsterValidator::validate(msg_in, snapshot_in, n_events, seed_in);
+    const auto result = LobsterValidator::validate(msg_in, snapshot_in, n_events, seed_in, jsonl_out);
+
+    if (jsonl_out != nullptr) {
+        jsonl_file.flush();
+        if (!jsonl_file) {
+            std::cerr << "failed writing " << jsonl_path << '\n';
+            return 1;
+        }
+        std::cout << "wrote book snapshots to " << jsonl_path << '\n';
+    }
 
     std::cout << result.summary() << '\n';
     if (!result.mismatch_log.empty()) {

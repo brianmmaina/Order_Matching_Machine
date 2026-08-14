@@ -4,13 +4,13 @@ Limit-order **book**, **matching engine**, and **LOBSTER** (NASDAQ-style) CSV re
 
 **First C++ project**: I’m still learning idioms, tooling, and the tradeoffs below so the code is a learning sandbox, not battle-tested infra.
 
-Good for showing **systems-style C++**, **CMake**, **tests**, and **real market data** ingestion — not a production exchange stack.
+I thought it would be good for showing **systems-style C++**, **CMake**, **tests**, and **real market data** ingestion — not a production exchange stack.
 
 ---
 
 ## Tech stack
 
-- **C++17** · **CMake** · **GoogleTest** (16 tests)
+- **C++17** · **CMake** · **GoogleTest** (17 tests)
 - Sorted **vector** of price levels + **deque** FIFO per level · **hash map** for cancels by order id
 - **Lock-free SPSC queue** (single producer / single consumer) for feed vs matcher
 - Optional **Benchmarker** harness (latency percentiles, throughput)
@@ -25,7 +25,16 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Needs **network once** on configure (GoogleTest via FetchContent).
+Needs **network once** on configure (GoogleTest via FetchContent). Build type
+defaults to **Release** if you don't pass one. Builds with `-Wall -Wextra -Werror`.
+
+Sanitizer builds — `address`, `undefined`, `address,undefined`, or `thread`
+(thread and address are mutually exclusive):
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DOME_SANITIZE=address,undefined
+cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
+```
 
 ---
 
@@ -35,6 +44,18 @@ Sample CSVs are **not** in git. Download a message + orderbook pair from [LOBSTE
 
 ```bash
 ./build/lobster_replay --help
+```
+
+### Visualizing a replay
+
+`--jsonl` writes one top-of-book snapshot per applied message; open
+[`tools/book_replay.html`](tools/book_replay.html) and load the file to scrub
+through the book. The page is self-contained — no server, no CDN, no build step.
+
+```bash
+./build/lobster_replay --messages <message.csv> --orderbook <orderbook.csv> \
+  --events 1000 --jsonl /tmp/replay.jsonl
+open tools/book_replay.html
 ```
 
 ---

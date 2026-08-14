@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# a second push to the same branch cancels the first — no point burning runners
+# on a commit that has already been superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # the build every benchmark number must come from.
+  # clang on both platforms: the warning set below is tuned against clang, which
+  # is what the project is developed on. gcc runs separately and non-blocking.
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: build
+        run: cmake --build build -j
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+
+  # gcc diagnoses a different set than clang under -Wconversion/-Wshadow, and there
+  # is no gcc toolchain on the dev machine to iterate against. it started
+  # non-blocking for that reason; its one finding (-Wcomment) is fixed, so it
+  # blocks now — a second compiler is only worth having if it can fail the build.
+  gcc:
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: build
+        run: cmake --build build -j
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+
+  # address + undefined behavior. Debug so stack traces are usable.
+  sanitize:
+    strategy:
+      fail-fast: false
+      matrix:
+        # asan and tsan cannot be combined — separate jobs, not separate flags.
+        sanitizer: ["address,undefined", "thread"]
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DOME_SANITIZE=${{ matrix.sanitizer }}
+      - name: build
+        run: cmake --build build -j
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+        env:
+          # halt on the first finding rather than reporting and continuing, so a
+          # green run means genuinely clean and not "clean apart from the log".
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1

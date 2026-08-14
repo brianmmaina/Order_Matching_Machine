@@ -15,7 +15,6 @@
 namespace {
 // unnamed namespace: internal linkage — these helpers are visible only in this .cpp (like "static" file scope in c).
 
-constexpr double kPriceScale = 10000.0;
 // constexpr: compile-time constant; may be used in array sizes etc.; here just a named literal.
 
 void trim_in_place(std::string& s) {
@@ -186,7 +185,7 @@ bool parse_row(const std::vector<std::string>& fields, Order& out) {
     }
 
     out.id = m.order_id;
-    out.price = static_cast<double>(m.price_ticks) / kPriceScale;
+    out.price_ticks = m.price_ticks;
     out.quantity = m.size;
     out.side = (m.direction == 1) ? Order::BID : Order::ASK;
     out.type = ty;
@@ -195,8 +194,11 @@ bool parse_row(const std::vector<std::string>& fields, Order& out) {
 }
 
 bool line_all_whitespace(const std::string& line) {
-    for (unsigned char c : line) {
-        if (!std::isspace(c)) {
+    for (const char ch : line) {
+        // std::isspace takes an int that must be representable as unsigned char (or EOF);
+        // passing a negative char is UB, so widen through unsigned char explicitly rather
+        // than letting the char->unsigned char conversion happen implicitly.
+        if (!std::isspace(static_cast<unsigned char>(ch))) {
             return false;
         }
     }
