@@ -16,7 +16,6 @@
 
 namespace {
 
-constexpr double kTickScale = 10000.0;
 
 struct SnapshotLevel {
     int64_t price_ticks{};
@@ -97,7 +96,7 @@ void apply_message(MatchingEngine& eng, const LobsterMessage& m) {
         case 1: {
             Order o{};
             o.id = m.order_id;
-            o.price = static_cast<double>(m.price_ticks) / kTickScale;
+            o.price_ticks = m.price_ticks;
             o.quantity = m.size;
             o.side = (m.direction == 1) ? Order::BID : Order::ASK;
             o.type = Order::LIMIT;
@@ -115,16 +114,16 @@ void apply_message(MatchingEngine& eng, const LobsterMessage& m) {
             }
             // LOBSTER row may reference liquidity from before the file; drop size at price on that side.
             const Order::Side side = (m.direction == 1) ? Order::BID : Order::ASK;
-            const double px = static_cast<double>(m.price_ticks) / kTickScale;
-            static_cast<void>(eng.book().reduce_level_after_lobster_execution(side, px, m.size, true));
+            static_cast<void>(
+                eng.book().reduce_level_after_lobster_execution(side, m.price_ticks, m.size, true));
             break;
         }
         case 4:
         case 5: {
             // LOBSTER: direction is the resting limit's side (1 = buy/bid, -1 = sell/ask).
             const Order::Side passive = (m.direction == 1) ? Order::BID : Order::ASK;
-            const double px = static_cast<double>(m.price_ticks) / kTickScale;
-            static_cast<void>(eng.book().reduce_level_after_lobster_execution(passive, px, m.size, true));
+            static_cast<void>(
+                eng.book().reduce_level_after_lobster_execution(passive, m.price_ticks, m.size, true));
             break;
         }
         case 7:
@@ -179,7 +178,7 @@ bool seed_book_from_snapshot(std::istream& in, MatchingEngine& eng, std::ostring
         }
         Order o{};
         o.id = synth--;
-        o.price = static_cast<double>(snap_bids[i].price_ticks) / kTickScale;
+        o.price_ticks = snap_bids[i].price_ticks;
         o.quantity = static_cast<std::uint32_t>(sz64);
         o.side = Order::BID;
         o.type = Order::LIMIT;
@@ -197,7 +196,7 @@ bool seed_book_from_snapshot(std::istream& in, MatchingEngine& eng, std::ostring
         }
         Order o{};
         o.id = synth--;
-        o.price = static_cast<double>(snap_asks[i].price_ticks) / kTickScale;
+        o.price_ticks = snap_asks[i].price_ticks;
         o.quantity = static_cast<std::uint32_t>(sz64);
         o.side = Order::ASK;
         o.type = Order::LIMIT;
