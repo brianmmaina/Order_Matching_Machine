@@ -99,14 +99,14 @@ TEST(LobsterParser, maps_columns_and_lobster_types) {
     EXPECT_EQ(v[0].id, 1001u);
     EXPECT_EQ(v[0].type, Order::LIMIT);
     EXPECT_EQ(v[0].side, Order::BID);
-    EXPECT_DOUBLE_EQ(v[0].price, 10.05);
+    EXPECT_EQ(v[0].price_ticks, 100500);
     EXPECT_EQ(v[0].quantity, 250u);
     EXPECT_EQ(v[0].timestamp, 34200123456u);
 
     EXPECT_EQ(v[1].type, Order::CANCEL);
     EXPECT_EQ(v[1].id, 1002u);
     EXPECT_EQ(v[1].side, Order::ASK);
-    EXPECT_DOUBLE_EQ(v[1].price, 9.9999);
+    EXPECT_EQ(v[1].price_ticks, 99999);
 
     EXPECT_EQ(v[2].type, Order::CANCEL);
     EXPECT_EQ(v[2].id, 1003u);
@@ -134,6 +134,6 @@ TEST(LobsterParser, skips_malformed_rows) {
     ASSERT_EQ(v.size(), 1u);
     EXPECT_EQ(v[0].id, 42u);
     EXPECT_EQ(v[0].quantity, 7u);
-    EXPECT_DOUBLE_EQ(v[0].price, 2.0);
+    EXPECT_EQ(v[0].price_ticks, 20000);
     EXPECT_EQ(v[0].side, Order::ASK);
 }
