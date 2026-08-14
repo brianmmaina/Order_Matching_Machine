@@ -11,6 +11,7 @@
 #include "lobster/lobster_message.hpp"
 #include "lobster/lobster_parser.hpp"
 #include "matching_engine/matching_engine.hpp"
+#include "ome/book_jsonl.hpp"
 #include "order.h"
 
 namespace {
@@ -220,7 +221,8 @@ std::string LobsterValidator::Result::summary() const {
 }
 
 LobsterValidator::Result LobsterValidator::validate(std::istream& messages, std::istream& snapshot,
-                                                    std::size_t n_events, std::istream* snapshot_initial) {
+                                                    std::size_t n_events, std::istream* snapshot_initial,
+                                                    std::ostream* jsonl_out) {
     Result r{};
     std::ostringstream log_stream;
 
@@ -253,6 +255,12 @@ LobsterValidator::Result LobsterValidator::validate(std::istream& messages, std:
     }
     for (std::size_t i = first_msg; i < use_n; ++i) {
         apply_message(engine, all[i]);
+        if (jsonl_out != nullptr) {
+            // LOBSTER timestamps are microseconds since midnight; the record format is ns.
+            const std::uint64_t t_ns = all[i].timestamp_us * 1000ULL;
+            ome::write_book_record(*jsonl_out, t_ns, i, engine.book().bid_levels_ticks(10),
+                                   engine.book().ask_levels_ticks(10));
+        }
     }
 
     const auto our_bids = engine.book().bid_levels_ticks(10);
