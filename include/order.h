@@ -10,19 +10,27 @@ struct Order {
     enum Type { MARKET, LIMIT, CANCEL };
 
     uint64_t id;
-    double price;
+    // integer ticks, never a decimal price. see include/ome/ticks.hpp for why.
+    // matching compares these with ==, which is only meaningful on an exact type.
+    int64_t price_ticks;
     uint32_t quantity;
     Side side;
     Type type;
     uint64_t timestamp;
 
     // static member function: no "this"; call as Order::make(...) to build test orders with auto ids.
-    static Order make(double price, uint32_t quantity, Side side, Type type, uint64_t timestamp) {
+    //
+    // NOTE: next_id is a plain non-atomic counter. That is fine for tests and for
+    // the single-threaded replay path, but it is NOT safe to call from multiple
+    // threads. The gateway assigns exchange order ids from a counter owned by the
+    // matching thread instead — see the service build plan, session 0.3.
+    static Order make(int64_t price_ticks, uint32_t quantity, Side side, Type type,
+                      uint64_t timestamp) {
         // function-local static: single next_id for all calls; c++11+ guarantees thread-safe one-time init.
         static uint64_t next_id = 1;
         Order o;
         o.id = next_id++;
-        o.price = price;
+        o.price_ticks = price_ticks;
         o.quantity = quantity;
         o.side = side;
         o.type = type;

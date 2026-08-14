@@ -1,12 +1,9 @@
 #include "order_book/order_book.hpp"
 
 #include <algorithm>
-#include <cmath>
 // std::lower_bound: binary search on sorted range; std::min/max on scalars.
 
 namespace order_book {
-
-constexpr double kTickScale = 10000.0;
 
 // note: vector-of-levels vs map — contiguous levels help cache locality; inserts shift elements o(n) per level count.
 
@@ -16,19 +13,20 @@ void OrderBook::addOrder(Order order) {
     }
 
     const uint64_t id = order.id;
-    const double price = order.price;
+    const std::int64_t price = order.price_ticks;
     const Order::Side side = order.side;
 
     if (side == Order::BID) {
-        // lower_bound with custom comparator: finds insert position maintaining descending price (pl.price > p).
+        // lower_bound with custom comparator: finds insert position maintaining descending
+        // price (pl.price_ticks > p). integer compare — level identity is exact, no epsilon.
         auto it = std::lower_bound(
             bids_.begin(), bids_.end(), price,
-            [](const PriceLevel& pl, double p) { return pl.price > p; });
-        if (it != bids_.end() && it->price == price) {
+            [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks > p; });
+        if (it != bids_.end() && it->price_ticks == price) {
             it->orders.push_back(std::move(order));
         } else {
             PriceLevel level;
-            level.price = price;
+            level.price_ticks = price;
             level.orders.push_back(std::move(order));
             // vector::insert before iterator; may reallocate and shift — o(n) in number of levels.
             bids_.insert(it, std::move(level));
@@ -36,12 +34,12 @@ void OrderBook::addOrder(Order order) {
     } else {
         auto it = std::lower_bound(
             asks_.begin(), asks_.end(), price,
-            [](const PriceLevel& pl, double p) { return pl.price < p; });
-        if (it != asks_.end() && it->price == price) {
+            [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks < p; });
+        if (it != asks_.end() && it->price_ticks == price) {
             it->orders.push_back(std::move(order));
         } else {
             PriceLevel level;
-            level.price = price;
+            level.price_ticks = price;
             level.orders.push_back(std::move(order));
             asks_.insert(it, std::move(level));
         }
@@ -58,18 +56,18 @@ bool OrderBook::cancelOrder(uint64_t id) {
     }
 
     const Order::Side side = loc_it->second.first;
-    const double price = loc_it->second.second;
+    const std::int64_t price = loc_it->second.second;
 
     // generic lambda (c++14): operator() is a template; instantiated for each vector<pricelevel> book_side type.
     auto erase_from = [&](std::vector<PriceLevel>& book, bool bid_side) -> bool {
         auto it = bid_side
                       ? std::lower_bound(
                             book.begin(), book.end(), price,
-                            [](const PriceLevel& pl, double p) { return pl.price > p; })
+                            [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks > p; })
                       : std::lower_bound(
                             book.begin(), book.end(), price,
-                            [](const PriceLevel& pl, double p) { return pl.price < p; });
-        if (it == book.end() || it->price != price) {
+                            [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks < p; });
+        if (it == book.end() || it->price_ticks != price) {
             return false;
         }
         auto& dq = it->orders;
@@ -97,7 +95,7 @@ bool OrderBook::is_crossed() const noexcept {
     if (bids_.empty() || asks_.empty()) {
         return false;
     }
-    return bids_.front().price >= asks_.front().price;
+    return bids_.front().price_ticks >= asks_.front().price_ticks;
 }
 
 bool OrderBook::execute_top_cross(Trade& trade) {
@@ -113,7 +111,7 @@ bool OrderBook::execute_top_cross(Trade& trade) {
     const uint32_t qty = std::min(bid_order.quantity, ask_order.quantity);
     trade.buyer_id = bid_order.id;
     trade.seller_id = ask_order.id;
-    trade.price = ask_order.price;
+    trade.price_ticks = ask_order.price_ticks;
     trade.quantity = qty;
     trade.timestamp = std::max(bid_order.timestamp, ask_order.timestamp);
 
@@ -160,7 +158,7 @@ void OrderBook::match_market(uint64_t market_order_id, Order::Side side, uint32_
             Trade t{};
             t.buyer_id = market_order_id;
             t.seller_id = ask.id;
-            t.price = ask.price;
+            t.price_ticks = ask.price_ticks;
             t.quantity = take;
             t.timestamp = std::max(market_timestamp, ask.timestamp);
             trades_out.push_back(t);
@@ -185,7 +183,7 @@ void OrderBook::match_market(uint64_t market_order_id, Order::Side side, uint32_
         Trade t{};
         t.buyer_id = bid.id;
         t.seller_id = market_order_id;
-        t.price = bid.price;
+        t.price_ticks = bid.price_ticks;
         t.quantity = take;
         t.timestamp = std::max(market_timestamp, bid.timestamp);
         trades_out.push_back(t);
@@ -202,13 +200,7 @@ void OrderBook::match_market(uint64_t market_order_id, Order::Side side, uint32_
     }
 }
 
-namespace {
-bool price_ticks_equal(double a, double b) noexcept {
-    return std::llround(a * kTickScale) == std::llround(b * kTickScale);
-}
-}  // namespace
-
-bool OrderBook::reduce_level_after_lobster_execution(Order::Side passive_side, double price,
+bool OrderBook::reduce_level_after_lobster_execution(Order::Side passive_side, std::int64_t price,
                                                      uint32_t traded_size, bool allow_missing_level) {
     if (traded_size == 0) {
         return true;
@@ -223,10 +215,10 @@ bool OrderBook::reduce_level_after_lobster_execution(Order::Side passive_side, d
     auto& book = (passive_side == Order::BID) ? bids_ : asks_;
     const bool bid_side = (passive_side == Order::BID);
     auto it = bid_side ? std::lower_bound(book.begin(), book.end(), price,
-                                          [](const PriceLevel& pl, double p) { return pl.price > p; })
+                                          [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks > p; })
                        : std::lower_bound(book.begin(), book.end(), price,
-                                          [](const PriceLevel& pl, double p) { return pl.price < p; });
-    if (it == book.end() || !price_ticks_equal(it->price, price)) {
+                                          [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks < p; });
+    if (it == book.end() || it->price_ticks != price) {
         return allow_missing_level;
     }
 
@@ -268,17 +260,17 @@ bool OrderBook::replace_remaining_quantity(uint64_t id, uint32_t new_remaining) 
     }
 
     const Order::Side side = loc_it->second.first;
-    const double price = loc_it->second.second;
+    const std::int64_t price = loc_it->second.second;
 
     auto touch = [&](std::vector<PriceLevel>& book, bool bid_side) -> bool {
         auto it = bid_side
                       ? std::lower_bound(
                             book.begin(), book.end(), price,
-                            [](const PriceLevel& pl, double p) { return pl.price > p; })
+                            [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks > p; })
                       : std::lower_bound(
                             book.begin(), book.end(), price,
-                            [](const PriceLevel& pl, double p) { return pl.price < p; });
-        if (it == book.end() || it->price != price) {
+                            [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks < p; });
+        if (it == book.end() || it->price_ticks != price) {
             return false;
         }
         for (auto& o : it->orders) {
@@ -304,7 +296,7 @@ std::vector<std::pair<std::int64_t, std::uint64_t>> OrderBook::bid_levels_ticks(
         for (const auto& o : lvl.orders) {
             sum += o.quantity;
         }
-        out.emplace_back(static_cast<std::int64_t>(std::llround(lvl.price * kTickScale)), sum);
+        out.emplace_back(lvl.price_ticks, sum);
     }
     return out;
 }
@@ -320,7 +312,7 @@ std::vector<std::pair<std::int64_t, std::uint64_t>> OrderBook::ask_levels_ticks(
         for (const auto& o : lvl.orders) {
             sum += o.quantity;
         }
-        out.emplace_back(static_cast<std::int64_t>(std::llround(lvl.price * kTickScale)), sum);
+        out.emplace_back(lvl.price_ticks, sum);
     }
     return out;
 }
