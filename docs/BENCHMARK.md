@@ -78,11 +78,16 @@ _No results recorded yet. Populated by the engine benchmark runs._
 
 Throughput of parse + apply + validate over the sample files.
 
-**Baseline recorded 2026-08-13**, before the Session 0.2 integer-tick refactor.
-Its purpose is regression detection: 0.2 is a representation change that must
-not move accuracy at all. If any accuracy figure below changes after 0.2, the
-refactor altered behavior and needs investigating before anything is built on
-top of it.
+**Baseline recorded 2026-08-13**, before the Session 0.2 integer-tick refactor,
+and **re-verified unchanged after it** on 2026-08-14. The refactor was a
+representation change and had to move nothing.
+
+Two checks, the second much stronger than the first:
+1. Accuracy and first-mismatch index identical at all three event counts.
+2. The full `--jsonl` book snapshot stream at 1,000 events — every level of
+   both sides after every applied message — is **byte-identical** (md5
+   `8aaff3cb99aa790862336d2253702562` before and after). The end-state check
+   compares one snapshot; this compares a thousand.
 
 - Hardware: Apple M4 Pro (8 performance + 4 efficiency cores), 24 GB, macOS 26.4.1
 - Build: Apple clang 21.0.0, `CMAKE_BUILD_TYPE=Release`
