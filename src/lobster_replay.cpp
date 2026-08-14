@@ -1,7 +1,10 @@
 // CLI: replay LOBSTER message csv and compare book to a row from LOBSTER orderbook file.
 // Example:
-//   ./build/lobster_replay --messages data/lobster/AMZN_..._message_10.csv \
-//     --orderbook data/lobster/AMZN_..._orderbook_10.csv --events 10000
+//   ./build/lobster_replay --messages data/lobster/AMZN_..._message_10.csv
+//                          --orderbook data/lobster/AMZN_..._orderbook_10.csv --events 10000
+//
+// (no trailing backslashes in these comments: a line continuation inside a //
+//  comment splices the next line into it, which -Wcomment rightly flags.)
 
 #include <cstdlib>
 #include <fstream>
