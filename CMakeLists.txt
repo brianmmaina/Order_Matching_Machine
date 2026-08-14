@@ -46,6 +46,7 @@ if(OME_SANITIZE)
 endif()
 
 add_library(order_book STATIC
+  src/net/tcp_server.cpp
   src/order_book.cpp
   src/matching_engine.cpp
   src/lobster_parser.cpp
@@ -63,6 +64,9 @@ target_link_libraries(main PRIVATE order_book ome_warnings)
 
 add_executable(lobster_replay src/lobster_replay.cpp)
 target_link_libraries(lobster_replay PRIVATE order_book ome_warnings)
+
+add_executable(gateway src/gateway_main.cpp)
+target_link_libraries(gateway PRIVATE order_book ome_warnings)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -86,6 +90,8 @@ if(BUILD_TESTING)
     tests/test_spsc.cpp
     tests/test_reject_reason.cpp
     tests/test_protocol.cpp
+    tests/test_framing.cpp
+    tests/test_tcp_server.cpp
   )
   target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main Threads::Threads)
 
