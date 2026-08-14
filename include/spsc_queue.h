@@ -18,17 +18,19 @@
 #include <atomic>
 #include <cstddef>
 #include <optional>
+#include <utility>
 
-#include "order.h"
-
-template <std::size_t N>
+// generic over element type: the gateway pushes an OrderCommand (session id +
+// payload), not a bare Order. T must be default-constructible, because the ring
+// owns kSlots of them from construction.
+template <typename T, std::size_t N>
 class SpscQueue {
-    // capacity n means at most n orders buffered; we use n+1 slots so “full” and “empty”
+    // capacity n means at most n elements buffered; we use n+1 slots so “full” and “empty”
     // (head == tail vs. (head+1)%slots == tail) stay distinguishable without a third counter.
     static_assert(N > 0, "spsc: template capacity n must be > 0");
     static constexpr std::size_t kSlots = N + 1;
 
-    std::array<Order, kSlots> buffer_{};
+    std::array<T, kSlots> buffer_{};
 
     // false sharing: head_ and tail_ live in different logical variables but if they share one
     // cache line (e.g. 64 bytes), a write on one core invalidates that whole line on other cores.
@@ -47,7 +49,7 @@ public:
     SpscQueue& operator=(const SpscQueue&) = delete;
 
     // producer-only: returns false if queue is full (no block / spin — typical lock-free try).
-    [[nodiscard]] bool push(Order o) {
+    [[nodiscard]] bool push(T o) {
         // relaxed ok here: only this thread modifies head_; intra-thread order still visible.
         const std::size_t h = head_.load(std::memory_order_relaxed);
         const std::size_t t = tail_.load(std::memory_order_acquire);
@@ -61,15 +63,15 @@ public:
         return true;
     }
 
-    // consumer-only: empty queue → null optional; else one order (moved out of the ring).
-    [[nodiscard]] std::optional<Order> pop() {
+    // consumer-only: empty queue → null optional; else one element (moved out of the ring).
+    [[nodiscard]] std::optional<T> pop() {
         const std::size_t t = tail_.load(std::memory_order_relaxed);
         // acquire: see producer’s release on head_ before reading buffer_[t].
         const std::size_t h = head_.load(std::memory_order_acquire);
         if (t == h) {
             return std::nullopt;
         }
-        Order out = std::move(buffer_[t]);
+        T out = std::move(buffer_[t]);
         // release: pairs with producer’s acquire load of tail_ so reuse of slot t is safe.
         tail_.store((t + 1) % kSlots, std::memory_order_release);
         return out;
