@@ -45,6 +45,10 @@ enum class CommandType : std::uint8_t {
     NewOrder,
     Cancel,
     Modify,
+    // Adds the session to the broadcast set. Owned by the matching thread and
+    // mutated through the command stream like everything else, so the network
+    // thread never touches it.
+    Subscribe,
     // Emitted when a session dies. Travels the SAME queue as everything else
     // rather than reaching into the book directly — which is the entire reason
     // cancel-on-disconnect needs no lock. The network thread notices the death;
@@ -66,12 +70,24 @@ struct OrderCommand {
     // Connection owns the queue and cannot free it until it observes
     // SessionRetired coming back the other way.
     EgressQueue* egress{nullptr};
+    // Market data travels a separate queue with the opposite overflow policy.
+    // See book_snapshot.hpp for why one queue cannot serve both.
+    void* md_queue{nullptr};
 
-    static OrderCommand session_opened(SessionId s, EgressQueue* q) {
+    static OrderCommand session_opened(SessionId s, EgressQueue* q, void* md) {
         OrderCommand c{};
         c.type = CommandType::SessionOpened;
         c.session = s;
         c.egress = q;
+        c.md_queue = md;
+        return c;
+    }
+
+    static OrderCommand subscribe(SessionId s, std::uint8_t depth) {
+        OrderCommand c{};
+        c.type = CommandType::Subscribe;
+        c.session = s;
+        c.quantity = depth;  // reuse: depth is small and the field is otherwise idle
         return c;
     }
 

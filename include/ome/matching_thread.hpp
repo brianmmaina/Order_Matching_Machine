@@ -23,6 +23,7 @@
 // maintain it consistently with the book it describes.
 // ---------------------------------------------------------------------------
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -33,6 +34,7 @@
 
 #include "matching_engine/matching_engine.hpp"
 #include "ome/commands.hpp"
+#include "ome/book_snapshot.hpp"
 #include "ome/egress.hpp"
 #include "ome/risk_config.hpp"
 #include "ome/waiter.hpp"
@@ -47,6 +49,7 @@ struct MatchingStats {
     std::uint64_t commands_applied{0};
     std::uint64_t events_emitted{0};
     std::uint64_t egress_overflows{0};
+    std::uint64_t market_data_dropped{0};
     std::uint64_t sessions_retired{0};
 };
 
@@ -114,6 +117,19 @@ private:
         switch (c.type) {
             case CommandType::SessionOpened:
                 egress_[c.session] = c.egress;
+                md_[c.session] = static_cast<MarketDataQueue*>(c.md_queue);
+                return;
+            case CommandType::Subscribe:
+                // The broadcast set is matching-thread state, reached only
+                // through the command stream. A network thread writing it
+                // directly would be shared mutable state between the two.
+                subscribers_[c.session] =
+                    static_cast<std::uint8_t>(std::min<std::uint32_t>(
+                        c.quantity == 0 ? protocol::kMaxBookDepth : c.quantity,
+                        protocol::kMaxBookDepth));
+                emit(egress_for(c.session),
+                     OrderEvent::ack(c.session, 0, 0));
+                publish_book();  // a fresh subscriber gets current state at once
                 return;
             case CommandType::NewOrder:
                 apply_new_order(c);
@@ -228,6 +244,7 @@ private:
         // engine's behavior, and docs/PROTOCOL.md commits to it.
         emit(eg, OrderEvent::ack(c.session, c.client_order_id, o.id));
         publish_trades(before);
+        publish_book();
 
         // A market order's unfilled remainder is discarded rather than rested,
         // so it never becomes a resting order anyone could cancel.
@@ -254,6 +271,7 @@ private:
         }
         forget_order(xoid);
         emit(eg, OrderEvent::ack(c.session, c.client_order_id, xoid, /*closes=*/true));
+        publish_book();
     }
 
     void apply_modify(const OrderCommand& c) {
@@ -290,6 +308,47 @@ private:
         apply_new_order(replacement);
     }
 
+    // Builds one top-of-book snapshot and pushes it to every subscriber.
+    //
+    // Called after any command that could have moved the book. A subscriber
+    // that keeps up sees each of these; one that falls behind has them
+    // conflated on the consumer side. See book_snapshot.hpp.
+    void publish_book() {
+        if (subscribers_.empty()) {
+            return;  // nothing to build, so do not walk the book at all
+        }
+        const auto bids = engine_.book().bid_levels_ticks(protocol::kMaxBookDepth);
+        const auto asks = engine_.book().ask_levels_ticks(protocol::kMaxBookDepth);
+
+        BookSnapshot snap{};
+        snap.seq = ++book_seq_;
+        snap.n_bids = static_cast<std::uint8_t>(bids.size());
+        snap.n_asks = static_cast<std::uint8_t>(asks.size());
+        for (std::size_t i = 0; i < bids.size(); ++i) {
+            snap.bid_ticks[i] = bids[i].first;
+            snap.bid_qty[i] = bids[i].second;
+        }
+        for (std::size_t i = 0; i < asks.size(); ++i) {
+            snap.ask_ticks[i] = asks[i].first;
+            snap.ask_qty[i] = asks[i].second;
+        }
+
+        for (const auto& [session, depth] : subscribers_) {
+            static_cast<void>(depth);
+            const auto it = md_.find(session);
+            if (it == md_.end() || it->second == nullptr) {
+                continue;
+            }
+            if (!it->second->push(snap)) {
+                // Full. DROPPING IS CORRECT HERE and is the whole asymmetry:
+                // a newer snapshot supersedes an older one, so a subscriber
+                // that cannot keep up loses intermediate states and not
+                // information. Contrast emit(), where a full queue disconnects.
+                ++stats_.market_data_dropped;
+            }
+        }
+    }
+
     void apply_cancel_all(const OrderCommand& c) {
         // Cancel-on-disconnect, for real. It arrives through the same queue as
         // everything else, so the network thread never touches the book.
@@ -314,7 +373,10 @@ private:
         }
         session_orders_.erase(c.session);
         egress_.erase(c.session);
+        md_.erase(c.session);
+        subscribers_.erase(c.session);
         ++stats_.sessions_retired;
+        publish_book();  // the cancels changed the book
     }
 
     // Turns the trades this command produced into per-session fills.
@@ -407,6 +469,8 @@ private:
     std::atomic<bool> running_{false};
 
     std::unordered_map<SessionId, EgressQueue*> egress_;
+    std::unordered_map<SessionId, MarketDataQueue*> md_;
+    std::unordered_map<SessionId, std::uint8_t> subscribers_;
     std::unordered_map<std::uint64_t, SessionId> owner_of_;
     std::unordered_map<std::uint64_t, std::uint64_t> client_id_of_;
     std::unordered_map<std::uint64_t, std::uint32_t> remaining_of_;
@@ -417,6 +481,7 @@ private:
     // Reference for the price band. 0 means "no trade yet", which falls back to
     // the mid and then to accepting anything.
     std::int64_t last_trade_ticks_{0};
+    std::uint64_t book_seq_{0};
     std::uint64_t next_exchange_id_{1};
     std::uint64_t logical_clock_{0};
     MatchingStats stats_;
