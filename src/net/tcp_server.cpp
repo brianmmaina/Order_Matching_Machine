@@ -601,8 +601,15 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
             // The flag here only gates DRAINING. Membership of the broadcast set
             // lives on the matching thread and is set by the command below —
             // this side must never be the authority on who receives what.
-            c.subscribed = true;
-            static_cast<void>(submit(c, OrderCommand::subscribe(c.id(), m->depth)));
+            //
+            // Set it only if the command was actually accepted. Setting it
+            // first meant that a Subscribe dropped by a full inbound queue left
+            // the session marked subscribed here while the matching thread had
+            // never heard of it: the client received a RATE_LIMITED reject and
+            // then silently no market data, forever.
+            if (submit(c, OrderCommand::subscribe(c.id(), m->depth))) {
+                c.subscribed = true;
+            }
             return;
         }
         case MessageType::Heartbeat:
