@@ -612,3 +612,128 @@ TEST(Risk, heartbeats_are_exempt_from_the_rate_limit) {
     EXPECT_TRUE(got_reply) << "session was starved by its own heartbeats";
     ::close(fd);
 }
+
+// --- market data broadcast, end to end (session 1.6) -----------------------
+
+namespace {
+void subscribe(int fd, std::uint8_t depth = 10) {
+    Subscribe s{};
+    s.depth = depth;
+    const auto f = encode_frame(MessageType::Subscribe, s);
+    ASSERT_EQ(::send(fd, f.data(), f.size(), 0), static_cast<ssize_t>(f.size()));
+}
+}  // namespace
+
+TEST(Broadcast, a_subscriber_receives_book_updates) {
+    Gateway g;
+    ASSERT_TRUE(g.started());
+    const int sub = dial(g.port());
+    const int trader = dial(g.port());
+    ASSERT_GE(sub, 0);
+    ASSERT_GE(trader, 0);
+
+    subscribe(sub);
+    Msg m{};
+    // Subscribing publishes current state immediately, so a fresh subscriber
+    // is not blind until the next trade.
+    ASSERT_TRUE(next_of_type(sub, MessageType::BookUpdate, m)) << "no snapshot on subscribe";
+
+    send_order(trader, 1, 1000000, 10, Side::Bid);
+    ASSERT_TRUE(next_of_type(trader, MessageType::Ack, m));
+
+    ASSERT_TRUE(next_of_type(sub, MessageType::BookUpdate, m)) << "no update after a book change";
+    const auto up = decode<BookUpdate>(m.payload.data(), m.payload.size());
+    ASSERT_TRUE(up.has_value());
+    ASSERT_FALSE(up->bids.empty()) << "update did not show the resting bid";
+    EXPECT_EQ(up->bids[0].price_ticks, 1000000);
+    EXPECT_EQ(up->bids[0].quantity, 10u);
+    ::close(sub);
+    ::close(trader);
+}
+
+TEST(Broadcast, an_unsubscribed_session_receives_nothing) {
+    Gateway g;
+    ASSERT_TRUE(g.started());
+    const int quiet = dial(g.port());
+    const int trader = dial(g.port());
+    ASSERT_GE(quiet, 0);
+    ASSERT_GE(trader, 0);
+
+    send_order(trader, 1, 1000000, 10, Side::Bid);
+    Msg m{};
+    ASSERT_TRUE(next_of_type(trader, MessageType::Ack, m));
+
+    // The quiet session should see only heartbeats.
+    for (int i = 0; i < 3; ++i) {
+        Msg extra{};
+        if (!next_msg(quiet, extra)) break;
+        EXPECT_NE(static_cast<MessageType>(extra.header.type), MessageType::BookUpdate)
+            << "an unsubscribed session received market data";
+    }
+    ::close(quiet);
+    ::close(trader);
+}
+
+TEST(Broadcast, two_subscribers_see_the_same_book) {
+    Gateway g;
+    ASSERT_TRUE(g.started());
+    const int a = dial(g.port());
+    const int b = dial(g.port());
+    const int trader = dial(g.port());
+    ASSERT_GE(a, 0);
+    ASSERT_GE(b, 0);
+    ASSERT_GE(trader, 0);
+
+    subscribe(a);
+    subscribe(b);
+    Msg m{};
+    ASSERT_TRUE(next_of_type(a, MessageType::BookUpdate, m));
+    ASSERT_TRUE(next_of_type(b, MessageType::BookUpdate, m));
+
+    send_order(trader, 1, 1234500, 7, Side::Ask);
+    ASSERT_TRUE(next_of_type(trader, MessageType::Ack, m));
+
+    Msg ma{}, mb{};
+    ASSERT_TRUE(next_of_type(a, MessageType::BookUpdate, ma));
+    ASSERT_TRUE(next_of_type(b, MessageType::BookUpdate, mb));
+    const auto ua = decode<BookUpdate>(ma.payload.data(), ma.payload.size());
+    const auto ub = decode<BookUpdate>(mb.payload.data(), mb.payload.size());
+    ASSERT_TRUE(ua.has_value());
+    ASSERT_TRUE(ub.has_value());
+    ASSERT_FALSE(ua->asks.empty());
+    ASSERT_FALSE(ub->asks.empty());
+    EXPECT_EQ(ua->asks[0].price_ticks, 1234500);
+    EXPECT_EQ(ub->asks[0].price_ticks, ua->asks[0].price_ticks) << "subscribers disagree";
+    ::close(a);
+    ::close(b);
+    ::close(trader);
+}
+
+TEST(Broadcast, updates_carry_a_strictly_increasing_sequence) {
+    // seq is the ordering key. Conflation skips values, so it must be
+    // increasing rather than contiguous — a client detecting "gaps" as an error
+    // would flag normal operation.
+    Gateway g;
+    ASSERT_TRUE(g.started());
+    const int sub = dial(g.port());
+    const int trader = dial(g.port());
+    ASSERT_GE(sub, 0);
+    ASSERT_GE(trader, 0);
+
+    subscribe(sub);
+    Msg m{};
+    ASSERT_TRUE(next_of_type(sub, MessageType::BookUpdate, m));
+
+    std::uint64_t prev = 0;
+    for (std::uint64_t i = 1; i <= 5; ++i) {
+        send_order(trader, i, 1000000 + static_cast<std::int64_t>(i) * 100, 1, Side::Bid);
+        ASSERT_TRUE(next_of_type(trader, MessageType::Ack, m));
+        ASSERT_TRUE(next_of_type(sub, MessageType::BookUpdate, m));
+        const auto up = decode<BookUpdate>(m.payload.data(), m.payload.size());
+        ASSERT_TRUE(up.has_value());
+        EXPECT_GT(up->seq, prev) << "sequence did not advance";
+        prev = up->seq;
+    }
+    ::close(sub);
+    ::close(trader);
+}
