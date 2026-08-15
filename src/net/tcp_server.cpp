@@ -117,7 +117,9 @@ void TcpServer::run() {
 
         for (const auto& c : conns_) {
             pollfd p{};
-            p.fd = c->fd;
+            // -1 makes poll() ignore the entry while preserving the
+            // conns_[i] <-> pfds[i+1] correspondence used below.
+            p.fd = c->retiring ? -1 : c->fd;
             // POLLIN: bytes are readable, or the peer closed (a read returning
             // 0 is how we learn about the close).
             p.events = POLLIN;
@@ -149,6 +151,13 @@ void TcpServer::run() {
         // is why poll() has a bounded timeout: a completely silent set of
         // connections still needs heartbeats sent and dead ones swept.
         service_timers(monotonic_now());
+
+        // Egress is drained for every connection each iteration, including ones
+        // whose socket is already closed — those are being held open precisely
+        // to observe the SessionRetired tombstone.
+        for (auto& cp : conns_) {
+            drain_egress(*cp);
+        }
 
         // Iterate backwards so erasing a closed connection does not disturb
         // the indices of the ones not yet visited.
@@ -229,6 +238,13 @@ void TcpServer::accept_new() {
         conns_.push_back(std::make_unique<Connection>(fd, next_session_id_++,
                                                       cfg_.max_write_buffer, monotonic_now(),
                                                       cfg_.session));
+        // Hand the matching thread this session's egress queue before any
+        // command for it can arrive. Registration travels the command queue
+        // like everything else — there is no side channel between the threads.
+        Connection& c = *conns_.back();
+        if (inbound_ != nullptr) {
+            static_cast<void>(submit(c, OrderCommand::session_opened(c.id(), c.egress.get())));
+        }
     }
 }
 
@@ -314,6 +330,78 @@ void TcpServer::handle_writable(Connection& c) {
     }
 }
 
+bool TcpServer::submit(Connection& c, const OrderCommand& cmd) {
+    if (inbound_ == nullptr) {
+        return false;
+    }
+    if (!inbound_->push(cmd)) {
+        // The matching thread is behind by 8192 commands. Backpressure has to
+        // land somewhere, and rejecting is the only honest option: silently
+        // dropping would leave the client waiting for a response forever, and
+        // blocking the network thread would stall every OTHER session too.
+        queue(c, protocol::encode_frame(
+                     protocol::MessageType::Reject,
+                     protocol::Reject{cmd.client_order_id, RejectReason::RATE_LIMITED}));
+        return false;
+    }
+    // Signal AFTER the push is published. See waiter.hpp: reversing these is
+    // the missed-wake-up race.
+    if (waiter_ != nullptr) {
+        waiter_->signal();
+    }
+    return true;
+}
+
+void TcpServer::deliver(Connection& c, const OrderEvent& e) {
+    using namespace protocol;
+    switch (e.type) {
+        case EventType::Ack:
+            if (e.closes_order) {
+                static_cast<void>(c.session.forget_order(e.client_order_id));
+            }
+            queue(c, encode_frame(MessageType::Ack, Ack{e.client_order_id, e.exchange_order_id}));
+            return;
+        case EventType::Reject:
+            // The order never rested, so the session must stop holding its
+            // client_order_id — otherwise the client could never retry it.
+            static_cast<void>(c.session.forget_order(e.client_order_id));
+            queue(c, encode_frame(MessageType::Reject, Reject{e.client_order_id, e.reason}));
+            return;
+        case EventType::Fill:
+            if (e.closes_order) {
+                static_cast<void>(c.session.forget_order(e.client_order_id));
+            }
+            queue(c, encode_frame(MessageType::Fill,
+                                  Fill{e.exchange_order_id, e.price_ticks, e.quantity,
+                                       e.remaining_quantity}));
+            return;
+        case EventType::SessionRetired:
+            // The tombstone. The matching thread will never push here again, so
+            // the queue and the Connection can now be destroyed.
+            c.retiring = false;
+            c.close_now();
+            return;
+    }
+}
+
+void TcpServer::drain_egress(Connection& c) {
+    if (!c.egress) {
+        return;
+    }
+    if (c.egress->overflowed()) {
+        // The matching thread could not report a full queue THROUGH the queue,
+        // so it latched a flag. Order flow is never dropped; the session goes.
+        c.close_now();
+        return;
+    }
+    while (auto e = c.egress->pop()) {
+        deliver(c, *e);
+        if (c.close_mode == CloseMode::Immediate && e->type != EventType::SessionRetired) {
+            return;
+        }
+    }
+}
+
 void TcpServer::queue(Connection& c, const std::vector<std::uint8_t>& bytes) {
     if (!c.writer.append(bytes)) {
         // Slow-consumer policy for order flow: disconnect rather than buffer
@@ -356,12 +444,18 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
                                       Reject{m->client_order_id, RejectReason::DUPLICATE_ORDER_ID}));
                 return;
             }
-            // SESSION 1.3 STUB: still a hardcoded Ack. There is no book yet, so
-            // the exchange_order_id is fabricated. Session 1.4 replaces this
-            // with a command onto the SPSC queue and an Ack produced by the
-            // matching thread.
-            queue(c, encode_frame(MessageType::Ack,
-                                  Ack{m->client_order_id, c.id() * 1000000 + ++acks_}));
+            // Onto the queue. The Ack now comes back from the matching thread
+            // through this session's egress queue — the network thread never
+            // touches the book.
+            if (inbound_ == nullptr) {
+                // No engine attached (framing tests): ack locally.
+                queue(c, encode_frame(MessageType::Ack,
+                                      Ack{m->client_order_id, c.id() * 1000000 + ++acks_}));
+                return;
+            }
+            if (!submit(c, OrderCommand::new_order(c.id(), *m))) {
+                static_cast<void>(c.session.forget_order(m->client_order_id));
+            }
             return;
         }
         case MessageType::Cancel: {
@@ -370,14 +464,16 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
                 queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::MALFORMED}));
                 return;
             }
-            // Cancelling something this session never had is knowable without
-            // the book, so it is answered here.
-            if (!c.session.forget_order(m->client_order_id)) {
+            // Not answered here any more. Whether the order still rests is book
+            // state, and only the matching thread may read the book — an order
+            // can fill between the client sending this and the cancel being
+            // applied, and only the matching thread sees that ordering.
+            if (inbound_ == nullptr) {
                 queue(c, encode_frame(MessageType::Reject,
-                                      Reject{m->client_order_id, RejectReason::UNKNOWN_ORDER}));
+                                      Reject{m->client_order_id, RejectReason::NOT_IMPLEMENTED}));
                 return;
             }
-            queue(c, encode_frame(MessageType::Ack, Ack{m->client_order_id, 0}));
+            static_cast<void>(submit(c, OrderCommand::cancel(c.id(), m->client_order_id)));
             return;
         }
         case MessageType::Modify: {
@@ -390,10 +486,14 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
                 queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::MALFORMED}));
                 return;
             }
-            // Echo the client_order_id: a client with several orders in flight
-            // cannot act on a rejection that does not say which one it concerns.
-            queue(c, encode_frame(MessageType::Reject,
-                                  Reject{m->client_order_id, RejectReason::NOT_IMPLEMENTED}));
+            if (inbound_ == nullptr) {
+                // Echo the client_order_id: a client with several orders in
+                // flight cannot act on a rejection that omits which one.
+                queue(c, encode_frame(MessageType::Reject,
+                                      Reject{m->client_order_id, RejectReason::NOT_IMPLEMENTED}));
+                return;
+            }
+            static_cast<void>(submit(c, OrderCommand::modify(c.id(), *m)));
             return;
         }
         case MessageType::Subscribe: {
@@ -422,18 +522,30 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
 }
 
 void TcpServer::kill_session(Connection& c) {
-    // mark_dead() returns true only on the transition, so the cancel-all fires
-    // exactly once no matter how many paths notice the death (timeout, peer
-    // close, framing error, write-buffer overflow).
+    // mark_dead() returns true only on the transition, so this fires exactly
+    // once no matter how many paths notice the death (timeout, peer close,
+    // framing error, write-buffer overflow, egress overflow).
     if (!c.session.mark_dead()) {
         return;
     }
     if (cancel_all_) {
         cancel_all_(c.session.id(), c.session.live_order_count());
-    } else {
-        std::fprintf(stderr, "[session %llu] disconnect: cancel-all for %zu resting orders\n",
-                     static_cast<unsigned long long>(c.session.id()),
-                     c.session.live_order_count());
+    }
+    if (inbound_ == nullptr) {
+        if (!cancel_all_) {
+            std::fprintf(stderr, "[session %llu] disconnect: cancel-all for %zu resting orders\n",
+                         static_cast<unsigned long long>(c.session.id()),
+                         c.session.live_order_count());
+        }
+        return;
+    }
+    // The real thing: cancel-on-disconnect as a command on the same queue as
+    // everything else. The network thread cannot cancel anything itself — only
+    // the matching thread may touch the book.
+    if (submit(c, OrderCommand::cancel_all(c.session.id()))) {
+        // Hold the Connection open, socket closed, until SessionRetired comes
+        // back. That tombstone is what makes freeing the egress queue safe.
+        c.retiring = true;
     }
 }
 
@@ -458,12 +570,25 @@ void TcpServer::close_connection(std::size_t index) {
     if (index >= conns_.size()) {
         return;
     }
+    Connection& c = *conns_[index];
     // Every close path funnels through here, so cancel-on-disconnect cannot be
     // missed by a route that forgot to call it.
-    kill_session(*conns_[index]);
-    if (conns_[index]->fd >= 0) {
-        ::close(conns_[index]->fd);
-        conns_[index]->fd = -1;
+    kill_session(c);
+
+    // The socket goes immediately — no reason to hold a descriptor for a peer
+    // that is gone.
+    if (c.fd >= 0) {
+        ::close(c.fd);
+        c.fd = -1;
+    }
+
+    // But the Connection itself may not be destroyed yet: it owns the egress
+    // queue, and the matching thread may still be pushing into it. Destruction
+    // waits for the SessionRetired tombstone, which deliver() turns into an
+    // Immediate close with retiring cleared.
+    if (c.retiring) {
+        c.close_mode = CloseMode::None;  // re-armed when the tombstone arrives
+        return;
     }
     conns_.erase(conns_.begin() + static_cast<std::ptrdiff_t>(index));
 }
