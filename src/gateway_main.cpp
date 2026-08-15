@@ -3,7 +3,9 @@
 // Session 1.2: network layer only. A valid NewOrder gets a hardcoded Ack.
 // The matching engine is wired in session 1.4.
 
+#include <cerrno>
 #include <csignal>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -43,7 +45,21 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (arg == "--port" && i + 1 < argc) {
-            cfg.port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
+            // strtol with full validation, not atoi: atoi cannot distinguish
+            // "0" from unparseable input, so `--port abc` would silently bind
+            // an ephemeral port, and an unchecked narrowing would turn
+            // `--port 70000` into 4464. Both fail in the confusing direction —
+            // the server starts, on the wrong port.
+            const std::string raw = argv[++i];
+            char* end = nullptr;
+            errno = 0;
+            const long v = std::strtol(raw.c_str(), &end, 10);
+            if (raw.empty() || end == raw.c_str() || *end != '\0' || errno == ERANGE ||
+                v < 0 || v > 65535) {
+                std::cerr << "invalid --port: " << raw << " (expected 0-65535)\n";
+                return 1;
+            }
+            cfg.port = static_cast<std::uint16_t>(v);
             continue;
         }
         std::cerr << "unknown argument: " << arg << "\n";
