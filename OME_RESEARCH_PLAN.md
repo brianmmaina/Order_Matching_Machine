@@ -53,7 +53,7 @@ Both streams, same analysis code, error bars across seeds.
 | Spread distribution | Yes | **Yes** |
 | Depth profile by level | Approximately | **Yes** |
 | Return distribution, kurtosis | Partially | No |
-| Volatility clustering (ACF of \|r\|) | **No** | No |
+| Volatility clustering (ACF of \|r\|) | **No** | No — but only usable for the three wide-spread symbols |
 | Order-sign autocorrelation | **No** — zero by construction | No |
 | Price impact vs volume (~√) | Partially | **Yes** — reclassified by R0 |
 
@@ -82,7 +82,7 @@ That the research project's prerequisite is a thing already wanted for its own s
 
 **R0 — Stylized facts from the raw messages.** ✅ **DONE** — `analysis/stylized_facts.py`, results in `docs/STYLIZED_FACTS.md`
 
-Outcome: trade-sign autocorrelation is the headline (ACF(1) = 0.72–0.91 across five symbols, decaying to ~0 by lag 100) and is a clean falsification target, since a ZI model produces exactly zero by construction. Cancel ratio and fat tails are also strong. Volatility clustering is weak on one session (~380 one-minute observations). Price impact is not measurable without the book.
+Outcome: trade-sign autocorrelation is the headline (ACF(1) = 0.72–0.91 across five symbols, decaying to ~0 by lag 100) and is a clean falsification target, since a ZI model produces exactly zero by construction. Cancel ratio and fat tails are also strong. Volatility clustering is significant at a 10-second horizon for AAPL/AMZN/GOOG but undetectable for INTC/MSFT at any horizon — those two are tick-constrained (1-cent tick on a $27-30 stock), so bounce dominates. Price impact is not measurable without the book.
 
 *(original scope below)*
 
