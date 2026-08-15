@@ -68,6 +68,11 @@ target_link_libraries(lobster_replay PRIVATE order_book ome_warnings)
 add_executable(gateway src/gateway_main.cpp)
 target_link_libraries(gateway PRIVATE order_book ome_warnings)
 
+# The load generator needs threads regardless of BUILD_TESTING.
+find_package(Threads REQUIRED)
+add_executable(loadgen bench/loadgen.cpp)
+target_link_libraries(loadgen PRIVATE order_book ome_warnings Threads::Threads)
+
 include(CTest)
 if(BUILD_TESTING)
   include(FetchContent)
@@ -79,10 +84,7 @@ if(BUILD_TESTING)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
 
-  # the concurrent SPSC test spawns a thread; libstdc++ needs -pthread for that,
-  # libc++ on macOS does not. Threads::Threads papers over the difference.
-  find_package(Threads REQUIRED)
-
+  # Threads::Threads is already found above for loadgen.
   add_executable(tests
     tests/test_order_book.cpp
     tests/test_matching.cpp
@@ -96,6 +98,7 @@ if(BUILD_TESTING)
     tests/test_pipeline.cpp
     tests/test_risk.cpp
     tests/test_broadcast.cpp
+    tests/test_notifier.cpp
   )
   target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main Threads::Threads)
 
