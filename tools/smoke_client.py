@@ -75,6 +75,10 @@ def main():
         else:
             sock.sendall(frame)
 
+        # NOTE: this client exits straight after its Ack. It does not keep the
+        # session alive — a real client must send something at least every 15s
+        # (echoing the server's Heartbeat is the intended way) or the server
+        # will time it out and cancel its resting orders. See docs/PROTOCOL.md.
         msg_type, version, payload = recv_frame(sock)
         if msg_type == MSG_ACK:
             coid, xoid = struct.unpack("<QQ", payload)

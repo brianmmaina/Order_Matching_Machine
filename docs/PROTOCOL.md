@@ -116,6 +116,27 @@ u64 quantity}`. Bids descending, asks ascending, each side ≤ 10.
 
 **`Heartbeat`** (8 bytes) — `timestamp_ns`.
 
+### Liveness is a client obligation
+
+**A client MUST send at least one message every 15 seconds or the server will
+close its session and cancel all of its resting orders.**
+
+The server sends a `Heartbeat` every 5 seconds. Echoing it is the intended
+response, but *any* inbound message resets the timer — a client streaming
+orders never needs to heartbeat separately.
+
+This is stated as an obligation because the failure mode is otherwise
+surprising and expensive. A passive market maker that rests a quote and then
+waits for a fill is doing something entirely reasonable, and would have its
+orders cancelled 15 seconds later for the crime of being quiet. The server
+cannot distinguish that client from one whose host has been unplugged: TCP
+gives no timely indication that a peer has vanished, which is the whole reason
+an application-level heartbeat exists.
+
+Trading off in the other direction is worse. A longer timeout leaves orders
+resting for clients that genuinely cannot manage them, and no timeout at all
+means a dead client's orders trade forever.
+
 ---
 
 ## Behavior the client must know
