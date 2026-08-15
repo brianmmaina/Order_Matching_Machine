@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 
 #include "ome/reject_reason.hpp"
@@ -28,6 +29,14 @@ bool set_nonblocking(int fd) {
 
 std::string errno_msg(const char* what) {
     return std::string(what) + ": " + ::strerror(errno);
+}
+
+// steady_clock, not system_clock: a session must not be declared dead because
+// someone corrected the wall clock or an NTP step landed mid-trading.
+Nanos monotonic_now() {
+    return static_cast<Nanos>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count());
 }
 
 }  // namespace
@@ -132,6 +141,11 @@ void TcpServer::run() {
             accept_new();
         }
 
+        // Timer work runs every iteration regardless of socket activity, which
+        // is why poll() has a bounded timeout: a completely silent set of
+        // connections still needs heartbeats sent and dead ones swept.
+        service_timers(monotonic_now());
+
         // Iterate backwards so erasing a closed connection does not disturb
         // the indices of the ones not yet visited.
         for (std::size_t i = conns_.size(); i-- > 0;) {
@@ -199,7 +213,9 @@ void TcpServer::accept_new() {
         static_cast<void>(::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)));
 #endif
 
-        conns_.push_back(std::make_unique<Connection>(fd, next_conn_id_++, cfg_.max_write_buffer));
+        conns_.push_back(std::make_unique<Connection>(fd, next_session_id_++,
+                                                      cfg_.max_write_buffer, monotonic_now(),
+                                                      cfg_.session));
     }
 }
 
@@ -213,6 +229,10 @@ void TcpServer::handle_readable(Connection& c) {
             // Drain EVERY complete frame. One read can carry many; stopping
             // after the first would leave the rest buffered until the peer
             // happens to send more bytes — a subtle stall under load.
+            // ANY inbound traffic proves liveness, not just Heartbeat frames:
+            // a client streaming orders is obviously alive.
+            c.session.on_inbound(monotonic_now());
+
             while (auto frame = c.reader.next_frame()) {
                 dispatch(c, *frame);
                 if (c.want_close) {
@@ -309,14 +329,39 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
                                       Reject{m->client_order_id, RejectReason::INVALID_QTY}));
                 return;
             }
-            // SESSION 1.2 STUB: a hardcoded Ack. There is no book yet, so the
-            // exchange_order_id is fabricated from the connection id. Session
-            // 1.4 replaces this with a command onto the SPSC queue and an Ack
-            // produced by the matching thread.
-            queue(c, encode_frame(MessageType::Ack, Ack{m->client_order_id, c.id * 1000000 + ++acks_}));
+            // Duplicate detection is per-session and lives on the network
+            // thread: it needs no book state, so keeping it here stops garbage
+            // reaching the queue at all. Contrast with the price-band check in
+            // 1.5, which needs the book and therefore cannot live here.
+            if (!c.session.register_order(m->client_order_id)) {
+                queue(c, encode_frame(MessageType::Reject,
+                                      Reject{m->client_order_id, RejectReason::DUPLICATE_ORDER_ID}));
+                return;
+            }
+            // SESSION 1.3 STUB: still a hardcoded Ack. There is no book yet, so
+            // the exchange_order_id is fabricated. Session 1.4 replaces this
+            // with a command onto the SPSC queue and an Ack produced by the
+            // matching thread.
+            queue(c, encode_frame(MessageType::Ack,
+                                  Ack{m->client_order_id, c.id() * 1000000 + ++acks_}));
             return;
         }
-        case MessageType::Cancel:
+        case MessageType::Cancel: {
+            const auto m = decode<Cancel>(f.payload.data(), f.payload.size());
+            if (!m.has_value()) {
+                queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::MALFORMED}));
+                return;
+            }
+            // Cancelling something this session never had is knowable without
+            // the book, so it is answered here.
+            if (!c.session.forget_order(m->client_order_id)) {
+                queue(c, encode_frame(MessageType::Reject,
+                                      Reject{m->client_order_id, RejectReason::UNKNOWN_ORDER}));
+                return;
+            }
+            queue(c, encode_frame(MessageType::Ack, Ack{m->client_order_id, 0}));
+            return;
+        }
         case MessageType::Modify:
         case MessageType::Subscribe:
             // Well-formed and recognized, but unimplemented until the engine is
@@ -325,7 +370,9 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
             queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::MALFORMED}));
             return;
         case MessageType::Heartbeat:
-            return;  // session 1.3 gives these meaning
+            // Liveness was already recorded by on_inbound(); nothing else to do.
+            // The server does not require clients to heartbeat, only to speak.
+            return;
         default:
             queue(c, encode_frame(MessageType::Reject,
                                   Reject{0, RejectReason::UNKNOWN_MESSAGE_TYPE}));
@@ -333,10 +380,46 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
     }
 }
 
+void TcpServer::kill_session(Connection& c) {
+    // mark_dead() returns true only on the transition, so the cancel-all fires
+    // exactly once no matter how many paths notice the death (timeout, peer
+    // close, framing error, write-buffer overflow).
+    if (!c.session.mark_dead()) {
+        return;
+    }
+    if (cancel_all_) {
+        cancel_all_(c.session.id(), c.session.live_order_count());
+    } else {
+        std::fprintf(stderr, "[session %llu] disconnect: cancel-all for %zu resting orders\n",
+                     static_cast<unsigned long long>(c.session.id()),
+                     c.session.live_order_count());
+    }
+}
+
+void TcpServer::service_timers(Nanos now) {
+    for (auto& cp : conns_) {
+        Connection& c = *cp;
+        if (c.session.timed_out(now)) {
+            // Silent for longer than the timeout. Close rather than probe
+            // further: three heartbeat intervals have already gone unanswered.
+            kill_session(c);
+            c.want_close = true;
+            continue;
+        }
+        if (c.session.heartbeat_due(now)) {
+            queue(c, encode_frame(protocol::MessageType::Heartbeat, protocol::Heartbeat{now}));
+            c.session.on_heartbeat_sent(now);
+        }
+    }
+}
+
 void TcpServer::close_connection(std::size_t index) {
     if (index >= conns_.size()) {
         return;
     }
+    // Every close path funnels through here, so cancel-on-disconnect cannot be
+    // missed by a route that forgot to call it.
+    kill_session(*conns_[index]);
     if (conns_[index]->fd >= 0) {
         ::close(conns_[index]->fd);
         conns_[index]->fd = -1;
