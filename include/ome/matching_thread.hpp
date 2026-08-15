@@ -36,6 +36,7 @@
 #include "ome/commands.hpp"
 #include "ome/book_snapshot.hpp"
 #include "ome/egress.hpp"
+#include "ome/notifier.hpp"
 #include "ome/risk_config.hpp"
 #include "ome/waiter.hpp"
 #include "spsc_queue.h"
@@ -55,8 +56,9 @@ struct MatchingStats {
 
 class MatchingThread {
 public:
-    MatchingThread(InboundQueue& inbound, Waiter& waiter, RiskConfig risk = {})
-        : inbound_(inbound), waiter_(waiter), risk_(risk) {}
+    MatchingThread(InboundQueue& inbound, Waiter& waiter, RiskConfig risk = {},
+                   Notifier* egress_ready = nullptr)
+        : inbound_(inbound), waiter_(waiter), egress_ready_(egress_ready), risk_(risk) {}
 
     MatchingThread(const MatchingThread&) = delete;
     MatchingThread& operator=(const MatchingThread&) = delete;
@@ -109,6 +111,12 @@ private:
             apply(*cmd);
             ++applied;
             ++stats_.commands_applied;
+        }
+        // One wake-up per BATCH, not per event. The network thread only needs
+        // to be told that something is waiting; telling it a thousand times
+        // for a thousand fills would put a syscall per fill on this thread.
+        if (applied > 0 && egress_ready_ != nullptr) {
+            egress_ready_->notify();
         }
         return applied;
     }
@@ -465,6 +473,7 @@ private:
     MatchingEngine engine_;
     InboundQueue& inbound_;
     Waiter& waiter_;
+    Notifier* egress_ready_{nullptr};
     std::thread thread_;
     std::atomic<bool> running_{false};
 

@@ -86,9 +86,14 @@ int main(int argc, char** argv) {
         std::cerr << "failed to create wake-up pipe\n";
         return 1;
     }
-    ome::MatchingThread matcher(inbound, waiter, cfg.risk);
+    ome::Notifier egress_ready;
+    if (!egress_ready.valid()) {
+        std::cerr << "failed to create egress wake-up pipe\n";
+        return 1;
+    }
+    ome::MatchingThread matcher(inbound, waiter, cfg.risk, &egress_ready);
 
-    ome::TcpServer server(cfg, &inbound, &waiter);
+    ome::TcpServer server(cfg, &inbound, &waiter, &egress_ready);
     if (!server.start()) {
         std::cerr << "failed to start: " << server.last_error() << "\n";
         return 1;
