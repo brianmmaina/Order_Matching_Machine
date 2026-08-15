@@ -237,7 +237,7 @@ void TcpServer::accept_new() {
 
         conns_.push_back(std::make_unique<Connection>(fd, next_session_id_++,
                                                       cfg_.max_write_buffer, monotonic_now(),
-                                                      cfg_.session));
+                                                      cfg_.session, cfg_.risk));
         // Hand the matching thread this session's egress queue before any
         // command for it can arrive. Registration travels the command queue
         // like everything else — there is no side channel between the threads.
@@ -423,7 +423,19 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
         return;
     }
 
-    switch (static_cast<MessageType>(f.header.type)) {
+    const auto mtype = static_cast<MessageType>(f.header.type);
+
+    // Rate limit before decoding anything but the header. Heartbeats are exempt
+    // — throttling a client's liveness signal would time it out for the crime
+    // of being chatty, and they cost nothing to process.
+    if (mtype != MessageType::Heartbeat && !c.bucket.allow(monotonic_now())) {
+        // client_order_id is not known yet: decoding the payload to recover it
+        // would do the work the limiter exists to avoid.
+        queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::RATE_LIMITED}));
+        return;
+    }
+
+    switch (mtype) {
         case MessageType::NewOrder: {
             const auto m = decode<NewOrder>(f.payload.data(), f.payload.size());
             if (!m.has_value()) {

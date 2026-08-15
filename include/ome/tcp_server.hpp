@@ -37,7 +37,9 @@
 #include "ome/commands.hpp"
 #include "ome/egress.hpp"
 #include "ome/matching_thread.hpp"
+#include "ome/risk_config.hpp"
 #include "ome/session.hpp"
+#include "ome/token_bucket.hpp"
 #include "ome/write_buffer.hpp"
 
 namespace ome {
@@ -55,6 +57,7 @@ struct TcpServerConfig {
     // has any activity at all.
     int poll_timeout_ms{100};
     SessionConfig session{};
+    RiskConfig risk{};
     // How long to keep trying to flush a final message before dropping the
     // connection anyway.
     Nanos close_linger_ns{1000ULL * 1000 * 1000};
@@ -81,6 +84,10 @@ struct Connection {
     FrameReader reader;
     WriteBuffer writer;
     Session session;
+    // Per-session rate limiter. On the network thread because it needs no book
+    // state, so a client over its limit is refused before it can consume queue
+    // capacity or matching-thread time that other sessions need.
+    TokenBucket bucket;
     // Owned here, but NOT freed when the socket closes: the matching thread may
     // still be pushing into it. Released only after SessionRetired arrives.
     // See egress.hpp for why that ordering is sufficient.
@@ -93,8 +100,10 @@ struct Connection {
     // graceful close into an indefinite one, which is the same bug again.
     Nanos flush_deadline_ns{0};
 
-    Connection(int f, SessionId i, std::size_t write_cap, Nanos now, SessionConfig scfg)
+    Connection(int f, SessionId i, std::size_t write_cap, Nanos now, SessionConfig scfg,
+               const RiskConfig& risk)
         : fd(f), writer(write_cap), session(i, now, scfg),
+          bucket(risk.rate_per_sec, risk.rate_burst, now),
           egress(std::make_unique<EgressQueue>()) {}
 
     [[nodiscard]] SessionId id() const noexcept { return session.id(); }
