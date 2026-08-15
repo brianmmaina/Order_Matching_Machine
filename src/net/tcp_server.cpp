@@ -157,6 +157,7 @@ void TcpServer::run() {
         // to observe the SessionRetired tombstone.
         for (auto& cp : conns_) {
             drain_egress(*cp);
+            drain_market_data(*cp);
         }
 
         // Iterate backwards so erasing a closed connection does not disturb
@@ -243,7 +244,7 @@ void TcpServer::accept_new() {
         // like everything else — there is no side channel between the threads.
         Connection& c = *conns_.back();
         if (inbound_ != nullptr) {
-            static_cast<void>(submit(c, OrderCommand::session_opened(c.id(), c.egress.get())));
+            static_cast<void>(submit(c, OrderCommand::session_opened(c.id(), c.egress.get(), c.md.get())));
         }
     }
 }
@@ -384,6 +385,43 @@ void TcpServer::deliver(Connection& c, const OrderEvent& e) {
     }
 }
 
+void TcpServer::drain_market_data(Connection& c) {
+    if (!c.md || !c.subscribed) {
+        return;
+    }
+    // CONFLATION, and it happens here on the consumer side rather than by
+    // mutating a published ring slot (which would break the SPSC contract).
+    //
+    // Drain everything pending and keep only the last. A subscriber that keeps
+    // up receives every update; one that falls behind skips straight to
+    // current. That is correct for a full snapshot and would be catastrophic
+    // for order flow — which is exactly why the two use different queues.
+    BookSnapshot latest{};
+    bool have = false;
+    std::size_t skipped = 0;
+    while (auto s = c.md->pop()) {
+        if (have) {
+            ++skipped;
+        }
+        latest = *s;
+        have = true;
+    }
+    if (!have) {
+        return;
+    }
+    conflated_ += skipped;
+
+    protocol::BookUpdate up{};
+    up.seq = latest.seq;
+    for (std::uint8_t i = 0; i < latest.n_bids; ++i) {
+        up.bids.push_back({latest.bid_ticks[i], latest.bid_qty[i]});
+    }
+    for (std::uint8_t i = 0; i < latest.n_asks; ++i) {
+        up.asks.push_back({latest.ask_ticks[i], latest.ask_qty[i]});
+    }
+    queue(c, protocol::encode_frame(protocol::MessageType::BookUpdate, up));
+}
+
 void TcpServer::drain_egress(Connection& c) {
     if (!c.egress) {
         return;
@@ -514,8 +552,15 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
                 queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::MALFORMED}));
                 return;
             }
-            // Subscribe carries no client_order_id, so 0 is honest here.
-            queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::NOT_IMPLEMENTED}));
+            if (inbound_ == nullptr) {
+                queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::NOT_IMPLEMENTED}));
+                return;
+            }
+            // The flag here only gates DRAINING. Membership of the broadcast set
+            // lives on the matching thread and is set by the command below —
+            // this side must never be the authority on who receives what.
+            c.subscribed = true;
+            static_cast<void>(submit(c, OrderCommand::subscribe(c.id(), m->depth)));
             return;
         }
         case MessageType::Heartbeat:
