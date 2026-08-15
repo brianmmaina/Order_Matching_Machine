@@ -52,20 +52,62 @@ struct TcpServerConfig {
     // has any activity at all.
     int poll_timeout_ms{100};
     SessionConfig session{};
+    // How long to keep trying to flush a final message before dropping the
+    // connection anyway.
+    Nanos close_linger_ns{1000ULL * 1000 * 1000};
+    // How long to stop accepting after running out of file descriptors.
+    Nanos accept_backoff_ns{100ULL * 1000 * 1000};
 };
 
 // Per-connection state. Non-copyable: it owns a file descriptor.
+// How a connection should be torn down.
+//
+// The distinction exists because "close once the output has drained" is
+// UNSATISFIABLE in precisely the situations that most need a close: a peer that
+// has stopped reading is why the buffer is full, so waiting for it to empty
+// waits forever. Conflating the two inverts the slow-consumer policy — the
+// abusive connection is the one that never gets dropped.
+enum class CloseMode {
+    None,
+    AfterFlush,  // best effort: let queued output go out first, then close
+    Immediate,   // drop now; the peer is gone, hostile, or not reading
+};
+
 struct Connection {
     int fd{-1};
     FrameReader reader;
     WriteBuffer writer;
     Session session;
-    bool want_close{false};
+    CloseMode close_mode{CloseMode::None};
+    // Deadline for AfterFlush. Without it a peer that stops reading turns a
+    // graceful close into an indefinite one, which is the same bug again.
+    Nanos flush_deadline_ns{0};
 
     Connection(int f, SessionId i, std::size_t write_cap, Nanos now, SessionConfig scfg)
         : fd(f), writer(write_cap), session(i, now, scfg) {}
 
     [[nodiscard]] SessionId id() const noexcept { return session.id(); }
+    [[nodiscard]] bool closing() const noexcept { return close_mode != CloseMode::None; }
+
+    void close_now() noexcept { close_mode = CloseMode::Immediate; }
+
+    void close_after_flush(Nanos now, Nanos linger_ns) noexcept {
+        if (close_mode == CloseMode::None) {
+            close_mode = CloseMode::AfterFlush;
+            flush_deadline_ns = now + linger_ns;
+        }
+    }
+
+    // True when this connection should be torn down on this iteration.
+    [[nodiscard]] bool ready_to_close(Nanos now) const noexcept {
+        if (close_mode == CloseMode::Immediate) {
+            return true;
+        }
+        if (close_mode == CloseMode::AfterFlush) {
+            return writer.empty() || now >= flush_deadline_ns;
+        }
+        return false;
+    }
 };
 
 class TcpServer {
@@ -128,6 +170,7 @@ private:
     static_assert(std::atomic<bool>::is_always_lock_free, "signal handler needs a lock-free flag");
     std::atomic<bool> running_{false};
     SessionId next_session_id_{1};
+    Nanos accept_paused_until_ns_{0};
     std::uint64_t acks_{0};  // stub id source; removed in 1.4
     std::vector<std::unique_ptr<Connection>> conns_;
     std::string last_error_;

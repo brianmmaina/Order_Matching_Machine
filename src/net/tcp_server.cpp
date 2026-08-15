@@ -106,8 +106,12 @@ void TcpServer::run() {
         pfds.reserve(conns_.size() + 1);
 
         // POLLIN on the listener means "a connection is queued for accept()".
+        const Nanos loop_now = monotonic_now();
+        const bool accepting = loop_now >= accept_paused_until_ns_;
         pollfd lp{};
-        lp.fd = listen_fd_;
+        // fd -1 makes poll() ignore the entry while keeping indices stable, so
+        // the conns_[i] <-> pfds[i+1] correspondence below does not shift.
+        lp.fd = accepting ? listen_fd_ : -1;
         lp.events = POLLIN;
         pfds.push_back(lp);
 
@@ -170,13 +174,11 @@ void TcpServer::run() {
             if (re & POLLIN) {
                 handle_readable(c);
             }
-            if ((re & POLLHUP) && c.writer.empty()) {
-                c.want_close = true;
+            if (re & POLLHUP) {
+                // Peer hung up. Anything still buffered has nowhere to go.
+                c.close_now();
             }
-            // Deferred close: a connection being rejected still has its Reject
-            // sitting in the write buffer, so it is only torn down once that
-            // has drained.
-            if (c.want_close && c.writer.empty()) {
+            if (c.ready_to_close(monotonic_now())) {
                 close_connection(i);
             }
         }
@@ -196,7 +198,18 @@ void TcpServer::accept_new() {
             if (errno == EINTR || errno == ECONNABORTED) {
                 continue;  // transient: a peer aborted before we accepted
             }
-            return;  // EMFILE and friends: drop this round, try again next loop
+            if (errno == EMFILE || errno == ENFILE) {
+                // Out of file descriptors. The connection stays queued, and
+                // poll() is level-triggered, so returning here would report the
+                // listener readable again immediately and spin the loop at 100%
+                // CPU until an fd frees — exactly when the process is already
+                // under pressure. Stop polling the listener for a moment
+                // instead; existing connections keep being served and will
+                // release descriptors.
+                accept_paused_until_ns_ = monotonic_now() + cfg_.accept_backoff_ns;
+                return;
+            }
+            return;
         }
 
         if (!set_nonblocking(fd)) {
@@ -235,19 +248,20 @@ void TcpServer::handle_readable(Connection& c) {
 
             while (auto frame = c.reader.next_frame()) {
                 dispatch(c, *frame);
-                if (c.want_close) {
+                if (c.closing()) {
                     return;
                 }
             }
             if (c.reader.failed()) {
                 // Framing is unrecoverable: without delimiters there is no way
-                // to find where the next message starts.
-                c.want_close = true;
+                // to find where the next message starts. Nothing useful can be
+                // said to a peer we can no longer parse.
+                c.close_now();
                 return;
             }
             if (c.reader.buffered() > cfg_.max_read_buffer) {
                 // A peer holding open an incomplete frame forever.
-                c.want_close = true;
+                c.close_now();
                 return;
             }
             if (static_cast<std::size_t>(n) < sizeof(buf)) {
@@ -257,7 +271,7 @@ void TcpServer::handle_readable(Connection& c) {
         }
 
         if (n == 0) {
-            c.want_close = true;  // orderly peer close
+            c.close_now();  // orderly peer close; no point buffering a reply
             return;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -266,7 +280,7 @@ void TcpServer::handle_readable(Connection& c) {
         if (errno == EINTR) {
             continue;
         }
-        c.want_close = true;  // ECONNRESET and friends
+        c.close_now();  // ECONNRESET and friends
         return;
     }
 }
@@ -295,7 +309,7 @@ void TcpServer::handle_writable(Connection& c) {
         if (n < 0 && errno == EINTR) {
             continue;
         }
-        c.want_close = true;
+        c.close_now();  // the socket is broken; flushing is not an option
         return;
     }
 }
@@ -305,7 +319,11 @@ void TcpServer::queue(Connection& c, const std::vector<std::uint8_t>& bytes) {
         // Slow-consumer policy for order flow: disconnect rather than buffer
         // without limit. See include/ome/write_buffer.hpp for why dropping is
         // not an option for acks and fills.
-        c.want_close = true;
+        //
+        // IMMEDIATE, not after-flush: the buffer is full precisely because this
+        // peer is not reading, so waiting for it to drain waits forever. This
+        // was the bug — the abusive connection was the one that never closed.
+        c.close_now();
     }
 }
 
@@ -362,16 +380,39 @@ void TcpServer::dispatch(Connection& c, const Frame& f) {
             queue(c, encode_frame(MessageType::Ack, Ack{m->client_order_id, 0}));
             return;
         }
-        case MessageType::Modify:
-        case MessageType::Subscribe:
-            // Well-formed and recognized, but unimplemented until the engine is
-            // wired. Rejecting is honest; ignoring would leave a client waiting
-            // forever for a response that is never coming.
-            queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::MALFORMED}));
+        case MessageType::Modify: {
+            // Recognized and well-formed, but the engine is not wired until
+            // 1.4. NOT_IMPLEMENTED rather than MALFORMED: the message was not
+            // malformed, and telling a client its correct message was garbage
+            // sends it debugging the wrong thing.
+            const auto m = decode<Modify>(f.payload.data(), f.payload.size());
+            if (!m.has_value()) {
+                queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::MALFORMED}));
+                return;
+            }
+            // Echo the client_order_id: a client with several orders in flight
+            // cannot act on a rejection that does not say which one it concerns.
+            queue(c, encode_frame(MessageType::Reject,
+                                  Reject{m->client_order_id, RejectReason::NOT_IMPLEMENTED}));
             return;
+        }
+        case MessageType::Subscribe: {
+            const auto m = decode<Subscribe>(f.payload.data(), f.payload.size());
+            if (!m.has_value()) {
+                queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::MALFORMED}));
+                return;
+            }
+            // Subscribe carries no client_order_id, so 0 is honest here.
+            queue(c, encode_frame(MessageType::Reject, Reject{0, RejectReason::NOT_IMPLEMENTED}));
+            return;
+        }
         case MessageType::Heartbeat:
             // Liveness was already recorded by on_inbound(); nothing else to do.
-            // The server does not require clients to heartbeat, only to speak.
+            //
+            // Clients are REQUIRED to speak within the session timeout (see
+            // docs/PROTOCOL.md, "Liveness is a client obligation"). Any message
+            // counts, so an active client need never send one of these — but a
+            // passive one must, or its resting orders are cancelled.
             return;
         default:
             queue(c, encode_frame(MessageType::Reject,
@@ -401,9 +442,9 @@ void TcpServer::service_timers(Nanos now) {
         Connection& c = *cp;
         if (c.session.timed_out(now)) {
             // Silent for longer than the timeout. Close rather than probe
-            // further: three heartbeat intervals have already gone unanswered.
-            kill_session(c);
-            c.want_close = true;
+            // further: three heartbeat intervals have already gone unanswered,
+            // so there is no reason to believe a fourth would be read.
+            c.close_now();
             continue;
         }
         if (c.session.heartbeat_due(now)) {
