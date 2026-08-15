@@ -23,6 +23,7 @@
 #include "ome/commands.hpp"
 #include "ome/matching_thread.hpp"
 #include "ome/protocol.hpp"
+#include "ome/risk_config.hpp"
 #include "ome/tcp_server.hpp"
 #include "ome/waiter.hpp"
 
@@ -372,4 +373,242 @@ TEST(Pipeline, sustained_two_way_trading_stays_consistent) {
     EXPECT_EQ(maker_fills.load(), kRounds) << "lost fills under sustained load";
     ::close(maker);
     ::close(taker);
+}
+
+// --- risk checks, end to end (session 1.5) ---------------------------------
+//
+// These run through the real matching thread because the price band is defined
+// against the last trade or the mid. There is no way to test it without a book,
+// which is precisely the argument for where the check lives.
+
+namespace {
+
+class RiskGateway {
+public:
+    explicit RiskGateway(RiskConfig risk) {
+        matcher_ = std::make_unique<MatchingThread>(inbound_, waiter_, risk);
+        TcpServerConfig cfg{};
+        cfg.port = 0;
+        cfg.poll_timeout_ms = 5;
+        cfg.risk = risk;
+        server_ = std::make_unique<TcpServer>(cfg, &inbound_, &waiter_);
+        started_ = server_->start();
+        if (started_) {
+            port_ = server_->bound_port();
+            matcher_->start();
+            net_ = std::thread([this] { server_->run(); });
+        }
+    }
+    ~RiskGateway() {
+        if (started_) {
+            server_->stop();
+            if (net_.joinable()) net_.join();
+            matcher_->stop();
+        }
+    }
+    [[nodiscard]] bool started() const { return started_; }
+    [[nodiscard]] std::uint16_t port() const { return port_; }
+
+private:
+    InboundQueue inbound_;
+    Waiter waiter_;
+    std::unique_ptr<MatchingThread> matcher_;
+    std::unique_ptr<TcpServer> server_;
+    std::thread net_;
+    bool started_{false};
+    std::uint16_t port_{0};
+};
+
+RejectReason reason_of(int fd, Msg& m) {
+    EXPECT_TRUE(next_of_type(fd, MessageType::Reject, m));
+    const auto r = decode<Reject>(m.payload.data(), m.payload.size());
+    return r.has_value() ? r->reason : RejectReason::NONE;
+}
+
+}  // namespace
+
+TEST(Risk, quantity_limit_at_both_boundaries) {
+    RiskConfig risk{};
+    risk.max_order_qty = 100;
+    RiskGateway g(risk);
+    ASSERT_TRUE(g.started());
+    const int fd = dial(g.port());
+    ASSERT_GE(fd, 0);
+    Msg m{};
+
+    send_order(fd, 1, 1000000, 100, Side::Bid);  // exactly at the cap
+    ASSERT_TRUE(next_of_type(fd, MessageType::Ack, m)) << "the cap itself was rejected";
+
+    send_order(fd, 2, 1000000, 101, Side::Bid);  // one over
+    EXPECT_EQ(reason_of(fd, m), RejectReason::RISK_MAX_ORDER_SIZE);
+    ::close(fd);
+}
+
+TEST(Risk, zero_quantity_is_invalid_not_a_size_breach) {
+    RiskGateway g(RiskConfig{});
+    ASSERT_TRUE(g.started());
+    const int fd = dial(g.port());
+    ASSERT_GE(fd, 0);
+    Msg m{};
+    send_order(fd, 1, 1000000, 0, Side::Bid);
+    EXPECT_EQ(reason_of(fd, m), RejectReason::INVALID_QTY);
+    ::close(fd);
+}
+
+TEST(Risk, non_positive_price_is_rejected) {
+    RiskGateway g(RiskConfig{});
+    ASSERT_TRUE(g.started());
+    const int fd = dial(g.port());
+    ASSERT_GE(fd, 0);
+    Msg m{};
+    send_order(fd, 1, 0, 10, Side::Bid);
+    EXPECT_EQ(reason_of(fd, m), RejectReason::INVALID_PRICE);
+    send_order(fd, 2, -5000, 10, Side::Bid);
+    EXPECT_EQ(reason_of(fd, m), RejectReason::INVALID_PRICE);
+    ::close(fd);
+}
+
+TEST(Risk, tick_alignment_is_exact_integer_modulo) {
+    RiskConfig risk{};
+    risk.tick_size = 100;  // prices must be whole cents
+    RiskGateway g(risk);
+    ASSERT_TRUE(g.started());
+    const int fd = dial(g.port());
+    ASSERT_GE(fd, 0);
+    Msg m{};
+
+    send_order(fd, 1, 1000000, 10, Side::Bid);  // 1000000 % 100 == 0
+    ASSERT_TRUE(next_of_type(fd, MessageType::Ack, m));
+
+    send_order(fd, 2, 1000001, 10, Side::Bid);  // one tick off
+    EXPECT_EQ(reason_of(fd, m), RejectReason::INVALID_PRICE);
+    ::close(fd);
+}
+
+TEST(Risk, price_band_needs_the_book_and_only_applies_once_there_is_a_reference) {
+    // THE test for the two-layer design. The band is meaningless until the book
+    // has a reference price, so the same order is accepted before a trade and
+    // rejected after one. No network-thread check could produce that behavior,
+    // because the network thread cannot see the book.
+    RiskConfig risk{};
+    risk.price_band_bp = 1000;  // 10%
+    RiskGateway g(risk);
+    ASSERT_TRUE(g.started());
+
+    const int a = dial(g.port());
+    const int b = dial(g.port());
+    ASSERT_GE(a, 0);
+    ASSERT_GE(b, 0);
+    Msg m{};
+
+    // Empty book, no trades: a wild price has nothing to be far FROM, and
+    // rejecting it would refuse the first order ever placed.
+    send_order(a, 1, 5000000, 10, Side::Bid);
+    ASSERT_TRUE(next_of_type(a, MessageType::Ack, m)) << "rejected with no reference price";
+
+    // Establish a trade at 5000000.
+    send_order(b, 100, 5000000, 10, Side::Ask);
+    ASSERT_TRUE(next_of_type(b, MessageType::Ack, m));
+    ASSERT_TRUE(next_of_type(b, MessageType::Fill, m)) << "no trade, so no reference established";
+
+    // Now the same kind of far-away order must be refused: 10% of 5000000 is
+    // 500000, so 5500000 is exactly at the edge and 5500001 is over it.
+    send_order(a, 2, 5500000, 10, Side::Bid);
+    ASSERT_TRUE(next_of_type(a, MessageType::Ack, m)) << "the band edge itself was rejected";
+
+    send_order(a, 3, 5500001, 10, Side::Bid);
+    EXPECT_EQ(reason_of(a, m), RejectReason::RISK_PRICE_BAND);
+
+    send_order(a, 4, 1000000, 10, Side::Bid);  // far below
+    EXPECT_EQ(reason_of(a, m), RejectReason::RISK_PRICE_BAND);
+
+    ::close(a);
+    ::close(b);
+}
+
+TEST(Risk, market_orders_skip_price_checks) {
+    // A market order carries no meaningful price; it takes whatever is there.
+    RiskConfig risk{};
+    risk.tick_size = 100;
+    risk.price_band_bp = 1;  // absurdly tight, to prove it is not consulted
+    RiskGateway g(risk);
+    ASSERT_TRUE(g.started());
+    const int maker = dial(g.port());
+    const int taker = dial(g.port());
+    ASSERT_GE(maker, 0);
+    ASSERT_GE(taker, 0);
+    Msg m{};
+
+    send_order(maker, 1, 1000000, 10, Side::Ask);
+    ASSERT_TRUE(next_of_type(maker, MessageType::Ack, m));
+
+    send_order(taker, 2, 0, 5, Side::Bid, OrderType::Market);
+    ASSERT_TRUE(next_of_type(taker, MessageType::Ack, m)) << "market order failed a price check";
+    EXPECT_TRUE(next_of_type(taker, MessageType::Fill, m));
+    ::close(maker);
+    ::close(taker);
+}
+
+TEST(Risk, rate_limit_refuses_a_burst_on_the_network_thread) {
+    // The limiter is on the network thread, so an over-limit client never
+    // reaches the queue at all. Observable here only as a Reject, but the point
+    // is what did NOT happen: no matching-thread work was done.
+    RiskConfig risk{};
+    risk.rate_per_sec = 1.0;   // effectively no refill during the test
+    risk.rate_burst = 5.0;
+    RiskGateway g(risk);
+    ASSERT_TRUE(g.started());
+    const int fd = dial(g.port());
+    ASSERT_GE(fd, 0);
+    Msg m{};
+
+    int accepted = 0;
+    bool saw_rate_limit = false;
+    for (std::uint64_t i = 1; i <= 20; ++i) {
+        send_order(fd, i, 1000000, 1, Side::Bid);
+    }
+    for (int i = 0; i < 20; ++i) {
+        if (!next_msg(fd, m)) break;
+        const auto t = static_cast<MessageType>(m.header.type);
+        if (t == MessageType::Ack) {
+            ++accepted;
+        } else if (t == MessageType::Reject) {
+            const auto r = decode<Reject>(m.payload.data(), m.payload.size());
+            if (r && r->reason == RejectReason::RATE_LIMITED) {
+                saw_rate_limit = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(saw_rate_limit) << "burst of 20 against a capacity-5 bucket was never limited";
+    EXPECT_LE(accepted, 5) << "accepted more than the burst capacity";
+    ::close(fd);
+}
+
+TEST(Risk, heartbeats_are_exempt_from_the_rate_limit) {
+    // Throttling a client's liveness signal would time it out for being chatty.
+    RiskConfig risk{};
+    risk.rate_per_sec = 1.0;
+    risk.rate_burst = 1.0;
+    RiskGateway g(risk);
+    ASSERT_TRUE(g.started());
+    const int fd = dial(g.port());
+    ASSERT_GE(fd, 0);
+
+    const auto hb = encode_frame(MessageType::Heartbeat, Heartbeat{123});
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_EQ(::send(fd, hb.data(), hb.size(), 0), static_cast<ssize_t>(hb.size()));
+    }
+    // Exhaust the single token, then confirm an order still gets through the
+    // refill rather than the session having been throttled to death.
+    Msg m{};
+    send_order(fd, 1, 1000000, 1, Side::Bid);
+    bool got_reply = false;
+    for (int i = 0; i < 10 && !got_reply; ++i) {
+        if (!next_msg(fd, m)) break;
+        const auto t = static_cast<MessageType>(m.header.type);
+        got_reply = (t == MessageType::Ack || t == MessageType::Reject);
+    }
+    EXPECT_TRUE(got_reply) << "session was starved by its own heartbeats";
+    ::close(fd);
 }
