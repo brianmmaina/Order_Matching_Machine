@@ -19,6 +19,11 @@ namespace ome {
 
 namespace {
 
+// pfds[0] is the listener, pfds[1] the matching-thread wake-up; connections
+// start at this offset.
+constexpr std::size_t kFixedPfds = 2;
+
+
 bool set_nonblocking(int fd) {
     const int flags = ::fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
@@ -115,6 +120,15 @@ void TcpServer::run() {
         lp.events = POLLIN;
         pfds.push_back(lp);
 
+        // The matching thread's wake-up channel. Without it, a freshly produced
+        // Ack waits for the next poll timeout or for another client to happen
+        // to send something — which the load generator measured as milliseconds
+        // of latency that had nothing to do with matching.
+        pollfd np{};
+        np.fd = (egress_ready_ != nullptr) ? egress_ready_->poll_fd() : -1;
+        np.events = POLLIN;
+        pfds.push_back(np);
+
         for (const auto& c : conns_) {
             pollfd p{};
             // -1 makes poll() ignore the entry while preserving the
@@ -133,7 +147,21 @@ void TcpServer::run() {
             pfds.push_back(p);
         }
 
-        const int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), cfg_.poll_timeout_ms);
+        // Never block while there is already output waiting. The wake-up pipe
+        // is an optimisation; THIS is what guarantees an event is delivered
+        // promptly even if a notification is lost. Without it a missed wake-up
+        // becomes a latency spike of a whole poll timeout, which is exactly
+        // what the load generator caught.
+        bool work_pending = false;
+        for (const auto& c : conns_) {
+            if (!c->writer.empty() || (c->egress && !c->egress->empty()) ||
+                (c->subscribed && c->md && !c->md->empty())) {
+                work_pending = true;
+                break;
+            }
+        }
+        const int timeout = work_pending ? 0 : cfg_.poll_timeout_ms;
+        const int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeout);
         if (n < 0) {
             // EINTR just means a signal arrived mid-wait; it is not an error.
             if (errno == EINTR) {
@@ -146,29 +174,24 @@ void TcpServer::run() {
         if (pfds[0].revents & POLLIN) {
             accept_new();
         }
+        if (egress_ready_ != nullptr && (pfds[1].revents & POLLIN)) {
+            egress_ready_->drain();
+        }
 
         // Timer work runs every iteration regardless of socket activity, which
         // is why poll() has a bounded timeout: a completely silent set of
         // connections still needs heartbeats sent and dead ones swept.
         service_timers(monotonic_now());
 
-        // Egress is drained for every connection each iteration, including ones
-        // whose socket is already closed — those are being held open precisely
-        // to observe the SessionRetired tombstone.
-        for (auto& cp : conns_) {
-            drain_egress(*cp);
-            drain_market_data(*cp);
-        }
-
         // Iterate backwards so erasing a closed connection does not disturb
         // the indices of the ones not yet visited.
         for (std::size_t i = conns_.size(); i-- > 0;) {
             // conns_ may have grown via accept_new() above; those new entries
             // have no matching pollfd this iteration and are simply skipped.
-            if (i + 1 >= pfds.size()) {
+            if (i + kFixedPfds >= pfds.size()) {
                 continue;
             }
-            const short re = pfds[i + 1].revents;
+            const short re = pfds[i + kFixedPfds].revents;
             Connection& c = *conns_[i];
 
             // POLLERR/POLLNVAL are always reported regardless of what we asked
@@ -187,6 +210,25 @@ void TcpServer::run() {
             if (re & POLLHUP) {
                 // Peer hung up. Anything still buffered has nowhere to go.
                 c.close_now();
+            }
+            if (c.ready_to_close(monotonic_now())) {
+                close_connection(i);
+            }
+        }
+
+        // Drain egress AFTER reading and dispatching, so an ack produced by
+        // this iteration's orders goes out on this iteration rather than the
+        // next. Retiring connections are drained too — they are held open
+        // precisely to observe the SessionRetired tombstone.
+        for (std::size_t i = conns_.size(); i-- > 0;) {
+            Connection& c = *conns_[i];
+            drain_egress(c);
+            drain_market_data(c);
+            if (!c.writer.empty() && c.fd >= 0) {
+                // Try to send immediately instead of waiting for POLLOUT next
+                // time round: on loopback the socket is almost always writable
+                // and this removes a whole poll cycle from the ack path.
+                handle_writable(c);
             }
             if (c.ready_to_close(monotonic_now())) {
                 close_connection(i);

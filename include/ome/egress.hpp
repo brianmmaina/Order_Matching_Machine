@@ -57,6 +57,11 @@ public:
     // Network thread only.
     [[nodiscard]] std::optional<OrderEvent> pop() { return q_.pop(); }
 
+    // Network thread only. Lets the loop decide not to block when work is
+    // already waiting, so delivery does not depend on the wake-up channel
+    // being perfect. See notifier.hpp.
+    [[nodiscard]] bool empty() const { return q_.empty(); }
+
     // Set by the matching thread when a push fails, read by the network thread.
     //
     // This exists because the matching thread cannot report a full queue THROUGH
