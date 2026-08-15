@@ -37,7 +37,8 @@ enum class RejectReason : std::uint16_t {
     MALFORMED = 6,             // frame did not decode
     RATE_LIMITED = 7,          // session exceeded its token bucket
     NOT_SUBSCRIBED = 8,        // market-data request from a session that never subscribed
-    UNKNOWN_MESSAGE_TYPE = 10  // well-formed frame, unrecognized type field
+    UNKNOWN_MESSAGE_TYPE = 10,  // well-formed frame, unrecognized type field
+    NOT_IMPLEMENTED = 11        // recognized message the server cannot serve yet
 };
 
 // Stable identifiers for logs and Prometheus label values. Deliberately the
@@ -56,6 +57,7 @@ enum class RejectReason : std::uint16_t {
         case RejectReason::NOT_SUBSCRIBED:       return "NOT_SUBSCRIBED";
         case RejectReason::DUPLICATE_ORDER_ID:   return "DUPLICATE_ORDER_ID";
         case RejectReason::UNKNOWN_MESSAGE_TYPE: return "UNKNOWN_MESSAGE_TYPE";
+        case RejectReason::NOT_IMPLEMENTED:      return "NOT_IMPLEMENTED";
     }
     // reached only if a code was added above without a case here; -Wswitch
     // catches that at compile time, so this is belt-and-braces for a value
