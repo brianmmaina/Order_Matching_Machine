@@ -15,6 +15,8 @@ void OrderBook::addOrder(Order order) {
     const uint64_t id = order.id;
     const std::int64_t price = order.price_ticks;
     const Order::Side side = order.side;
+    // captured before the move below
+    const std::uint64_t qty = order.quantity;
 
     if (side == Order::BID) {
         // lower_bound with custom comparator: finds insert position maintaining descending
@@ -23,10 +25,12 @@ void OrderBook::addOrder(Order order) {
             bids_.begin(), bids_.end(), price,
             [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks > p; });
         if (it != bids_.end() && it->price_ticks == price) {
+            it->total_qty += qty;
             it->orders.push_back(std::move(order));
         } else {
             PriceLevel level;
             level.price_ticks = price;
+            level.total_qty = qty;
             level.orders.push_back(std::move(order));
             // vector::insert before iterator; may reallocate and shift — o(n) in number of levels.
             bids_.insert(it, std::move(level));
@@ -36,10 +40,12 @@ void OrderBook::addOrder(Order order) {
             asks_.begin(), asks_.end(), price,
             [](const PriceLevel& pl, std::int64_t p) { return pl.price_ticks < p; });
         if (it != asks_.end() && it->price_ticks == price) {
+            it->total_qty += qty;
             it->orders.push_back(std::move(order));
         } else {
             PriceLevel level;
             level.price_ticks = price;
+            level.total_qty = qty;
             level.orders.push_back(std::move(order));
             asks_.insert(it, std::move(level));
         }
@@ -73,6 +79,7 @@ bool OrderBook::cancelOrder(uint64_t id) {
         auto& dq = it->orders;
         for (auto qit = dq.begin(); qit != dq.end(); ++qit) {
             if (qit->id == id) {
+                it->total_qty -= qit->quantity;
                 dq.erase(qit);
                 if (dq.empty()) {
                     book.erase(it);
@@ -117,6 +124,8 @@ bool OrderBook::execute_top_cross(Trade& trade) {
 
     bid_order.quantity -= qty;
     ask_order.quantity -= qty;
+    bid_level.total_qty -= qty;
+    ask_level.total_qty -= qty;
 
     const bool bid_gone = (bid_order.quantity == 0);
     const bool ask_gone = (ask_order.quantity == 0);
@@ -164,6 +173,7 @@ void OrderBook::match_market(uint64_t market_order_id, Order::Side side, uint32_
             trades_out.push_back(t);
             quantity_io -= take;
             ask.quantity -= take;
+            ask_level.total_qty -= take;
             if (ask.quantity == 0) {
                 const uint64_t rid = ask.id;
                 ask_level.orders.pop_front();
@@ -189,6 +199,7 @@ void OrderBook::match_market(uint64_t market_order_id, Order::Side side, uint32_
         trades_out.push_back(t);
         quantity_io -= take;
         bid.quantity -= take;
+        bid_level.total_qty -= take;
         if (bid.quantity == 0) {
             const uint64_t rid = bid.id;
             bid_level.orders.pop_front();
@@ -238,6 +249,7 @@ bool OrderBook::reduce_level_after_lobster_execution(Order::Side passive_side, s
         Order& front = it->orders.front();
         const std::uint32_t take = std::min(remaining, front.quantity);
         front.quantity -= take;
+        it->total_qty -= take;
         remaining -= take;
         if (front.quantity == 0) {
             const std::uint64_t rid = front.id;
@@ -275,6 +287,8 @@ bool OrderBook::replace_remaining_quantity(uint64_t id, uint32_t new_remaining) 
         }
         for (auto& o : it->orders) {
             if (o.id == id) {
+                // absolute set, so adjust the cached total by the delta
+                it->total_qty = it->total_qty - o.quantity + new_remaining;
                 o.quantity = new_remaining;
                 return true;
             }
@@ -291,12 +305,7 @@ std::vector<std::pair<std::int64_t, std::uint64_t>> OrderBook::bid_levels_ticks(
     const std::size_t n = std::min(max_levels, bids_.size());
     out.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
-        const auto& lvl = bids_[i];
-        std::uint64_t sum = 0;
-        for (const auto& o : lvl.orders) {
-            sum += o.quantity;
-        }
-        out.emplace_back(lvl.price_ticks, sum);
+        out.emplace_back(bids_[i].price_ticks, bids_[i].total_qty);
     }
     return out;
 }
@@ -307,14 +316,44 @@ std::vector<std::pair<std::int64_t, std::uint64_t>> OrderBook::ask_levels_ticks(
     const std::size_t n = std::min(max_levels, asks_.size());
     out.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
-        const auto& lvl = asks_[i];
-        std::uint64_t sum = 0;
-        for (const auto& o : lvl.orders) {
-            sum += o.quantity;
-        }
-        out.emplace_back(lvl.price_ticks, sum);
+        out.emplace_back(asks_[i].price_ticks, asks_[i].total_qty);
     }
     return out;
+}
+
+bool OrderBook::best_bid_ticks(std::int64_t& out) const noexcept {
+    if (bids_.empty()) {
+        return false;
+    }
+    out = bids_.front().price_ticks;
+    return true;
+}
+
+bool OrderBook::best_ask_ticks(std::int64_t& out) const noexcept {
+    if (asks_.empty()) {
+        return false;
+    }
+    out = asks_.front().price_ticks;
+    return true;
+}
+
+bool OrderBook::levels_consistent() const {
+    for (const auto* book : {&bids_, &asks_}) {
+        for (const auto& lvl : *book) {
+            std::uint64_t sum = 0;
+            for (const auto& o : lvl.orders) {
+                sum += o.quantity;
+            }
+            if (sum != lvl.total_qty) {
+                return false;
+            }
+            // an empty level should have been erased rather than left at zero
+            if (lvl.orders.empty()) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 }  // namespace order_book
