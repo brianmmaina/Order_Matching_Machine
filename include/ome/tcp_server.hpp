@@ -38,6 +38,7 @@
 #include "ome/egress.hpp"
 #include "ome/matching_thread.hpp"
 #include "ome/book_snapshot.hpp"
+#include "ome/notifier.hpp"
 #include "ome/risk_config.hpp"
 #include "ome/session.hpp"
 #include "ome/token_bucket.hpp"
@@ -140,8 +141,9 @@ class TcpServer {
 public:
     // inbound/matching may be null, which leaves the server in the session 1.2
     // shape: it acks locally without an engine. Used by the framing tests.
-    TcpServer(TcpServerConfig cfg, InboundQueue* inbound = nullptr, Waiter* waiter = nullptr)
-        : cfg_(cfg), inbound_(inbound), waiter_(waiter) {}
+    TcpServer(TcpServerConfig cfg, InboundQueue* inbound = nullptr, Waiter* waiter = nullptr,
+              Notifier* egress_ready = nullptr)
+        : cfg_(cfg), inbound_(inbound), waiter_(waiter), egress_ready_(egress_ready) {}
     ~TcpServer();
 
     TcpServer(const TcpServer&) = delete;
@@ -215,6 +217,7 @@ private:
     CancelAllHook cancel_all_;
     InboundQueue* inbound_{nullptr};
     Waiter* waiter_{nullptr};
+    Notifier* egress_ready_{nullptr};
 };
 
 }  // namespace ome
