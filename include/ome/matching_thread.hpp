@@ -203,12 +203,15 @@ private:
             out = last_trade_ticks_;
             return true;
         }
-        const auto bids = engine_.book().bid_levels_ticks(1);
-        const auto asks = engine_.book().ask_levels_ticks(1);
-        if (bids.empty() || asks.empty()) {
+        // Best PRICE only. This runs on every order when the band is enabled,
+        // and asking for the level's aggregate quantity here made it walk the
+        // top level's orders for a number it then discarded.
+        std::int64_t bid = 0;
+        std::int64_t ask = 0;
+        if (!engine_.book().best_bid_ticks(bid) || !engine_.book().best_ask_ticks(ask)) {
             return false;
         }
-        out = (bids[0].first + asks[0].first) / 2;
+        out = (bid + ask) / 2;
         return true;
     }
 
@@ -237,6 +240,7 @@ private:
         remaining_of_[o.id] = c.quantity;
         side_of_[o.id] = o.side;
         session_orders_[c.session].insert(o.id);
+        by_client_id_[key_of(c.session, c.client_order_id)] = o.id;
 
         const std::size_t before = engine_.trade_log_size();
         const ApplyResult r = engine_.processOrder(o);
@@ -342,12 +346,17 @@ private:
         }
 
         for (const auto& [session, depth] : subscribers_) {
-            static_cast<void>(depth);
             const auto it = md_.find(session);
             if (it == md_.end() || it->second == nullptr) {
                 continue;
             }
-            if (!it->second->push(snap)) {
+            // Honor the depth the client asked for. Sending more than requested
+            // is not a harmless generosity: the client sized its book for
+            // `depth` levels and the extra ones are bandwidth it did not want.
+            BookSnapshot sized = snap;
+            if (depth < snap.n_bids) sized.n_bids = depth;
+            if (depth < snap.n_asks) sized.n_asks = depth;
+            if (!it->second->push(sized)) {
                 // Full. DROPPING IS CORRECT HERE and is the whole asymmetry:
                 // a newer snapshot supersedes an older one, so a subscriber
                 // that cannot keep up loses intermediate states and not
@@ -441,23 +450,28 @@ private:
         return it == egress_.end() ? nullptr : it->second;
     }
 
+    // O(1). This used to scan every order the session held, doing a hash lookup
+    // per element, for EVERY cancel and modify — a session with ten thousand
+    // resting orders paid ten thousand lookups to cancel one of them.
     [[nodiscard]] std::uint64_t find_order(SessionId s, std::uint64_t client_order_id) const {
-        const auto it = session_orders_.find(s);
-        if (it == session_orders_.end()) {
-            return 0;
-        }
-        for (const std::uint64_t xoid : it->second) {
-            const auto c = client_id_of_.find(xoid);
-            if (c != client_id_of_.end() && c->second == client_order_id) {
-                return xoid;
-            }
-        }
-        return 0;
+        const auto it = by_client_id_.find(key_of(s, client_order_id));
+        return it == by_client_id_.end() ? 0 : it->second;
+    }
+
+    // Session and client_order_id packed into one key. client_order_id is
+    // client-chosen and only unique within a session, so the session must be
+    // part of the key or two clients numbering from 1 would collide.
+    [[nodiscard]] static std::uint64_t key_of(SessionId s, std::uint64_t coid) noexcept {
+        return (static_cast<std::uint64_t>(s) << 40) ^ (coid * 0x9E3779B97F4A7C15ULL);
     }
 
     void forget_order(std::uint64_t xoid) {
         const auto owner = owner_of_.find(xoid);
         if (owner != owner_of_.end()) {
+            const auto ci = client_id_of_.find(xoid);
+            if (ci != client_id_of_.end()) {
+                by_client_id_.erase(key_of(owner->second, ci->second));
+            }
             const auto so = session_orders_.find(owner->second);
             if (so != session_orders_.end()) {
                 so->second.erase(xoid);
@@ -485,6 +499,8 @@ private:
     std::unordered_map<std::uint64_t, std::uint32_t> remaining_of_;
     std::unordered_map<std::uint64_t, Order::Side> side_of_;
     std::unordered_map<SessionId, std::unordered_set<std::uint64_t>> session_orders_;
+    // (session, client_order_id) -> exchange_order_id
+    std::unordered_map<std::uint64_t, std::uint64_t> by_client_id_;
 
     RiskConfig risk_;
     // Reference for the price band. 0 means "no trade yet", which falls back to
