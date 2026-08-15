@@ -28,6 +28,7 @@
 // reuse it for record payloads without dragging in the network layer.
 // ---------------------------------------------------------------------------
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -128,6 +129,7 @@ struct Heartbeat {
 };
 
 inline constexpr std::size_t kMaxBookDepth = 10;
+
 
 // --- primitive encoding ----------------------------------------------------
 //
@@ -303,18 +305,28 @@ inline void encode(std::vector<std::uint8_t>& out, const Fill& m) {
 }
 
 inline void encode(std::vector<std::uint8_t>& out, const BookUpdate& m) {
+    // The depth cap is ENFORCED here, not merely assumed. The decoder rejects
+    // anything above kMaxBookDepth, so an over-deep encode would produce a
+    // frame our own decoder refuses; worse, past 255 levels the u8 count wraps
+    // and the message silently describes a different book than it carries.
+    //
+    // Truncation rather than failure is correct for this message specifically:
+    // BookUpdate is a top-N snapshot, so dropping the levels beyond N is what
+    // the receiver asked for. It would be wrong for any message where every
+    // field is load-bearing.
+    const std::size_t nb = std::min(m.bids.size(), kMaxBookDepth);
+    const std::size_t na = std::min(m.asks.size(), kMaxBookDepth);
+
     detail::put_u64(out, m.seq);
-    // counts are u8 and depth is capped at 10, so a malicious count cannot
-    // describe more levels than the payload could possibly hold.
-    detail::put_u8(out, static_cast<std::uint8_t>(m.bids.size()));
-    detail::put_u8(out, static_cast<std::uint8_t>(m.asks.size()));
-    for (const auto& l : m.bids) {
-        detail::put_i64(out, l.price_ticks);
-        detail::put_u64(out, l.quantity);
+    detail::put_u8(out, static_cast<std::uint8_t>(nb));
+    detail::put_u8(out, static_cast<std::uint8_t>(na));
+    for (std::size_t i = 0; i < nb; ++i) {
+        detail::put_i64(out, m.bids[i].price_ticks);
+        detail::put_u64(out, m.bids[i].quantity);
     }
-    for (const auto& l : m.asks) {
-        detail::put_i64(out, l.price_ticks);
-        detail::put_u64(out, l.quantity);
+    for (std::size_t i = 0; i < na; ++i) {
+        detail::put_i64(out, m.asks[i].price_ticks);
+        detail::put_u64(out, m.asks[i].quantity);
     }
 }
 
