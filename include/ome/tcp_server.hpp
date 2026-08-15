@@ -37,6 +37,7 @@
 #include "ome/commands.hpp"
 #include "ome/egress.hpp"
 #include "ome/matching_thread.hpp"
+#include "ome/book_snapshot.hpp"
 #include "ome/risk_config.hpp"
 #include "ome/session.hpp"
 #include "ome/token_bucket.hpp"
@@ -92,6 +93,10 @@ struct Connection {
     // still be pushing into it. Released only after SessionRetired arrives.
     // See egress.hpp for why that ordering is sufficient.
     std::unique_ptr<EgressQueue> egress;
+    // Separate from egress because the two streams need opposite overflow
+    // policies. See include/ome/book_snapshot.hpp.
+    std::unique_ptr<MarketDataQueue> md;
+    bool subscribed{false};
     // Socket is gone; we are holding the Connection open solely to observe the
     // tombstone. Poll skips it, but its egress is still drained.
     bool retiring{false};
@@ -104,7 +109,8 @@ struct Connection {
                const RiskConfig& risk)
         : fd(f), writer(write_cap), session(i, now, scfg),
           bucket(risk.rate_per_sec, risk.rate_burst, now),
-          egress(std::make_unique<EgressQueue>()) {}
+          egress(std::make_unique<EgressQueue>()),
+          md(std::make_unique<MarketDataQueue>()) {}
 
     [[nodiscard]] SessionId id() const noexcept { return session.id(); }
     [[nodiscard]] bool closing() const noexcept { return close_mode != CloseMode::None; }
@@ -165,6 +171,10 @@ public:
     // which is how tests bind an ephemeral port without racing each other.
     [[nodiscard]] std::uint16_t bound_port() const noexcept { return bound_port_; }
 
+    // Book updates skipped because a newer snapshot superseded them. Read after
+    // the loop has stopped; it is plain network-thread state.
+    [[nodiscard]] std::uint64_t conflated_updates() const noexcept { return conflated_; }
+
     // Session 1.3 STUB. When a session dies its resting orders must be
     // cancelled, but only the matching thread may touch the book — so the
     // network thread cannot do it here. Session 1.4 replaces this hook with a
@@ -185,6 +195,7 @@ private:
     void kill_session(Connection& c);
     void service_timers(Nanos now);
     void drain_egress(Connection& c);
+    void drain_market_data(Connection& c);
     void deliver(Connection& c, const OrderEvent& e);
     [[nodiscard]] bool submit(Connection& c, const OrderCommand& cmd);
 
@@ -197,7 +208,8 @@ private:
     std::atomic<bool> running_{false};
     SessionId next_session_id_{1};
     Nanos accept_paused_until_ns_{0};
-    std::uint64_t acks_{0};  // stub id source; removed in 1.4
+    std::uint64_t acks_{0};
+    std::uint64_t conflated_{0};  // stub id source; removed in 1.4
     std::vector<std::unique_ptr<Connection>> conns_;
     std::string last_error_;
     CancelAllHook cancel_all_;
