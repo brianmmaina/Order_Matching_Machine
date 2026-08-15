@@ -737,3 +737,36 @@ TEST(Broadcast, updates_carry_a_strictly_increasing_sequence) {
     ::close(sub);
     ::close(trader);
 }
+
+TEST(Broadcast, subscribe_depth_is_honored) {
+    // REGRESSION: the requested depth was stored and then ignored, so a client
+    // asking for 3 levels received 10.
+    Gateway g;
+    ASSERT_TRUE(g.started());
+    const int sub = dial(g.port());
+    const int trader = dial(g.port());
+    ASSERT_GE(sub, 0);
+    ASSERT_GE(trader, 0);
+
+    subscribe(sub, 3);
+    Msg m{};
+    ASSERT_TRUE(next_of_type(sub, MessageType::BookUpdate, m));
+
+    for (std::uint64_t i = 1; i <= 6; ++i) {
+        send_order(trader, i, 1000000 - static_cast<std::int64_t>(i) * 100, 1, Side::Bid);
+        ASSERT_TRUE(next_of_type(trader, MessageType::Ack, m));
+    }
+    // Drain to the newest update; conflation may have skipped intermediates.
+    BookUpdate last{};
+    for (int i = 0; i < 12; ++i) {
+        Msg u{};
+        if (!next_msg(sub, u)) break;
+        if (static_cast<MessageType>(u.header.type) != MessageType::BookUpdate) continue;
+        const auto up = decode<BookUpdate>(u.payload.data(), u.payload.size());
+        if (up) last = *up;
+        if (last.bids.size() >= 3) break;
+    }
+    EXPECT_LE(last.bids.size(), 3u) << "sent more levels than the client asked for";
+    ::close(sub);
+    ::close(trader);
+}
