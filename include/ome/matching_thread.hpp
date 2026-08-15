@@ -34,6 +34,7 @@
 #include "matching_engine/matching_engine.hpp"
 #include "ome/commands.hpp"
 #include "ome/egress.hpp"
+#include "ome/risk_config.hpp"
 #include "ome/waiter.hpp"
 #include "spsc_queue.h"
 
@@ -51,7 +52,8 @@ struct MatchingStats {
 
 class MatchingThread {
 public:
-    MatchingThread(InboundQueue& inbound, Waiter& waiter) : inbound_(inbound), waiter_(waiter) {}
+    MatchingThread(InboundQueue& inbound, Waiter& waiter, RiskConfig risk = {})
+        : inbound_(inbound), waiter_(waiter), risk_(risk) {}
 
     MatchingThread(const MatchingThread&) = delete;
     MatchingThread& operator=(const MatchingThread&) = delete;
@@ -128,8 +130,73 @@ private:
         }
     }
 
+    // Book-state risk checks. Runs on the matching thread because the price
+    // band is relative to the last trade or the mid, and only this thread may
+    // read the book. Returns NONE when the order is acceptable.
+    [[nodiscard]] RejectReason check_risk(const OrderCommand& c) const {
+        if (c.quantity == 0) {
+            return RejectReason::INVALID_QTY;
+        }
+        if (c.quantity > risk_.max_order_qty) {
+            return RejectReason::RISK_MAX_ORDER_SIZE;
+        }
+        // A market order carries no meaningful price, so price checks do not
+        // apply to it — it takes whatever the book offers.
+        if (c.order_type == protocol::OrderType::Market) {
+            return RejectReason::NONE;
+        }
+        if (c.price_ticks <= 0) {
+            return RejectReason::INVALID_PRICE;
+        }
+        // Integer modulo, not an epsilon comparison. Prices are tick counts, so
+        // "aligned" is exact or it is nothing.
+        if (risk_.tick_size > 1 && (c.price_ticks % risk_.tick_size) != 0) {
+            return RejectReason::INVALID_PRICE;
+        }
+        if (risk_.price_band_bp > 0) {
+            std::int64_t reference = 0;
+            if (!reference_price(reference)) {
+                // No last trade and no two-sided book: nothing to be far from.
+                // Rejecting here would refuse the first order ever placed.
+                return RejectReason::NONE;
+            }
+            // All integer arithmetic. The band is computed as a signed distance
+            // scaled by 10000 rather than by dividing, so nothing rounds toward
+            // zero and turns a marginal breach into an acceptance.
+            const std::int64_t distance = (c.price_ticks > reference)
+                                              ? c.price_ticks - reference
+                                              : reference - c.price_ticks;
+            if (distance * 10000 > reference * risk_.price_band_bp) {
+                return RejectReason::RISK_PRICE_BAND;
+            }
+        }
+        return RejectReason::NONE;
+    }
+
+    // Last trade if there has been one, else the mid of a two-sided book.
+    [[nodiscard]] bool reference_price(std::int64_t& out) const {
+        if (last_trade_ticks_ > 0) {
+            out = last_trade_ticks_;
+            return true;
+        }
+        const auto bids = engine_.book().bid_levels_ticks(1);
+        const auto asks = engine_.book().ask_levels_ticks(1);
+        if (bids.empty() || asks.empty()) {
+            return false;
+        }
+        out = (bids[0].first + asks[0].first) / 2;
+        return true;
+    }
+
     void apply_new_order(const OrderCommand& c) {
         EgressQueue* eg = egress_for(c.session);
+
+        // Risk gate first: nothing reaches the book until it has passed.
+        const RejectReason risk = check_risk(c);
+        if (risk != RejectReason::NONE) {
+            emit(eg, OrderEvent::reject(c.session, c.client_order_id, risk));
+            return;
+        }
 
         Order o{};
         o.id = next_exchange_id_++;
@@ -255,6 +322,7 @@ private:
         const auto& log = engine_.trade_log();
         for (std::size_t i = from; i < log.size(); ++i) {
             const Trade& t = log[i];
+            last_trade_ticks_ = t.price_ticks;
             route_fill(t.buyer_id, t);
             route_fill(t.seller_id, t);
         }
@@ -345,6 +413,10 @@ private:
     std::unordered_map<std::uint64_t, Order::Side> side_of_;
     std::unordered_map<SessionId, std::unordered_set<std::uint64_t>> session_orders_;
 
+    RiskConfig risk_;
+    // Reference for the price band. 0 means "no trade yet", which falls back to
+    // the mid and then to accepting anything.
+    std::int64_t last_trade_ticks_{0};
     std::uint64_t next_exchange_id_{1};
     std::uint64_t logical_clock_{0};
     MatchingStats stats_;

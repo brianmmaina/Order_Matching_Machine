@@ -11,6 +11,7 @@
 #include <string>
 
 #include "ome/matching_thread.hpp"
+#include "ome/risk_config.hpp"
 #include "ome/tcp_server.hpp"
 #include "ome/waiter.hpp"
 
@@ -30,6 +31,7 @@ extern "C" void on_signal(int) {
 void usage() {
     std::cerr << "usage: gateway [--port N]\n"
               << "  --port N   listen port (default 9001; 0 = pick any free port)\n"
+              << "  --risk F   risk limits from a key=value file (see config/risk.conf)\n"
               << "\n"
               << "Runs a network thread and a single matching thread joined by a\n"
               << "lock-free queue. The book is touched only by the matching thread.\n"
@@ -46,6 +48,14 @@ int main(int argc, char** argv) {
         if (arg == "--help") {
             usage();
             return 0;
+        }
+        if (arg == "--risk" && i + 1 < argc) {
+            std::string err;
+            if (!ome::RiskConfig::load(argv[++i], cfg.risk, err)) {
+                std::cerr << "risk config: " << err << "\n";
+                return 1;
+            }
+            continue;
         }
         if (arg == "--port" && i + 1 < argc) {
             // strtol with full validation, not atoi: atoi cannot distinguish
@@ -76,7 +86,7 @@ int main(int argc, char** argv) {
         std::cerr << "failed to create wake-up pipe\n";
         return 1;
     }
-    ome::MatchingThread matcher(inbound, waiter);
+    ome::MatchingThread matcher(inbound, waiter, cfg.risk);
 
     ome::TcpServer server(cfg, &inbound, &waiter);
     if (!server.start()) {
