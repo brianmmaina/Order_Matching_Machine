@@ -34,6 +34,9 @@
 
 #include "ome/frame_reader.hpp"
 #include "ome/protocol.hpp"
+#include "ome/commands.hpp"
+#include "ome/egress.hpp"
+#include "ome/matching_thread.hpp"
 #include "ome/session.hpp"
 #include "ome/write_buffer.hpp"
 
@@ -78,13 +81,21 @@ struct Connection {
     FrameReader reader;
     WriteBuffer writer;
     Session session;
+    // Owned here, but NOT freed when the socket closes: the matching thread may
+    // still be pushing into it. Released only after SessionRetired arrives.
+    // See egress.hpp for why that ordering is sufficient.
+    std::unique_ptr<EgressQueue> egress;
+    // Socket is gone; we are holding the Connection open solely to observe the
+    // tombstone. Poll skips it, but its egress is still drained.
+    bool retiring{false};
     CloseMode close_mode{CloseMode::None};
     // Deadline for AfterFlush. Without it a peer that stops reading turns a
     // graceful close into an indefinite one, which is the same bug again.
     Nanos flush_deadline_ns{0};
 
     Connection(int f, SessionId i, std::size_t write_cap, Nanos now, SessionConfig scfg)
-        : fd(f), writer(write_cap), session(i, now, scfg) {}
+        : fd(f), writer(write_cap), session(i, now, scfg),
+          egress(std::make_unique<EgressQueue>()) {}
 
     [[nodiscard]] SessionId id() const noexcept { return session.id(); }
     [[nodiscard]] bool closing() const noexcept { return close_mode != CloseMode::None; }
@@ -112,7 +123,10 @@ struct Connection {
 
 class TcpServer {
 public:
-    explicit TcpServer(TcpServerConfig cfg) : cfg_(cfg) {}
+    // inbound/matching may be null, which leaves the server in the session 1.2
+    // shape: it acks locally without an engine. Used by the framing tests.
+    TcpServer(TcpServerConfig cfg, InboundQueue* inbound = nullptr, Waiter* waiter = nullptr)
+        : cfg_(cfg), inbound_(inbound), waiter_(waiter) {}
     ~TcpServer();
 
     TcpServer(const TcpServer&) = delete;
@@ -161,6 +175,9 @@ private:
     void close_connection(std::size_t index);
     void kill_session(Connection& c);
     void service_timers(Nanos now);
+    void drain_egress(Connection& c);
+    void deliver(Connection& c, const OrderEvent& e);
+    [[nodiscard]] bool submit(Connection& c, const OrderCommand& cmd);
 
     TcpServerConfig cfg_;
     int listen_fd_{-1};
@@ -175,6 +192,8 @@ private:
     std::vector<std::unique_ptr<Connection>> conns_;
     std::string last_error_;
     CancelAllHook cancel_all_;
+    InboundQueue* inbound_{nullptr};
+    Waiter* waiter_{nullptr};
 };
 
 }  // namespace ome
