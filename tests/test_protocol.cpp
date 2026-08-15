@@ -348,3 +348,31 @@ TEST(ProtocolJson, book_update_uses_the_same_level_shape_as_the_replay_format) {
     EXPECT_EQ(json::to_json(b),
               R"({"type":"BookUpdate","seq":2,"bids":[[100,5]],"asks":[[200,7]]})");
 }
+
+// --- regressions from code review ------------------------------------------
+
+TEST(Protocol, book_update_encode_enforces_the_depth_cap) {
+    // REGRESSION: encode() documented a cap it did not apply. 11 levels produced
+    // a frame our own decoder rejected; 256 wrapped the u8 count to 0 and the
+    // message silently described a different book than it carried.
+    BookUpdate over{};
+    over.seq = 1;
+    for (int i = 0; i < 300; ++i) {
+        over.bids.push_back({1000 - i, 1});
+        over.asks.push_back({2000 + i, 1});
+    }
+
+    const auto bytes = payload_of(over);
+    const auto out = decode<BookUpdate>(bytes.data(), bytes.size());
+    ASSERT_TRUE(out.has_value()) << "over-deep encode produced an undecodable frame";
+    EXPECT_EQ(out->bids.size(), kMaxBookDepth);
+    EXPECT_EQ(out->asks.size(), kMaxBookDepth);
+    // truncation keeps the BEST levels, which is what a top-N snapshot means
+    EXPECT_EQ(out->bids[0].price_ticks, 1000);
+    EXPECT_EQ(out->asks[0].price_ticks, 2000);
+}
+
+TEST(RejectReasonCodes, not_implemented_is_appended_not_renumbered) {
+    EXPECT_EQ(static_cast<std::uint16_t>(ome::RejectReason::NOT_IMPLEMENTED), 11u);
+    EXPECT_STREQ(to_string(ome::RejectReason::NOT_IMPLEMENTED), "NOT_IMPLEMENTED");
+}
