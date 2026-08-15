@@ -94,6 +94,7 @@ if(BUILD_TESTING)
     tests/test_tcp_server.cpp
     tests/test_session.cpp
     tests/test_pipeline.cpp
+    tests/test_risk.cpp
   )
   target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main Threads::Threads)
 
