@@ -200,6 +200,15 @@ Beyond the standing honesty requirements above:
 - **Single runs are not trustworthy at the tail.** One early run reported a p99
   of 54 ms for a cell that five repeats placed at 440–570 µs. That is what the
   repetition requirement is for.
+- **The price band was disabled and nobody was subscribed.** `config/bench.conf`
+  sets `price_band_bp = 0`, and the load generator does not subscribe to market
+  data. Both of those paths consult the top of book, so this table measures the
+  order path with them switched off. They were made cheap after this run — the
+  level accessors now read a cached per-level total instead of summing a deque,
+  and the band check reads the best price without touching quantities at all —
+  but these numbers predate that and do not include either cost. A sweep with
+  the band enabled and a live subscriber is a separate measurement, and it has
+  not been taken.
 
 ---
 
