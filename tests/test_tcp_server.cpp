@@ -288,6 +288,12 @@ TEST(TcpServer, survives_abrupt_disconnects_garbage_and_churn) {
 }
 
 
+// NOTE: Cancel behavior moved to tests/test_pipeline.cpp in session 1.4.
+// Whether an order still rests is book state, and only the matching thread may
+// read the book — an order can fill in the window between a client sending
+// Cancel and the cancel being applied. This fixture has no engine attached, so
+// it can no longer answer that question and correctly says NOT_IMPLEMENTED.
+
 // --- session lifecycle over a real socket ----------------------------------
 
 TEST(TcpServer, duplicate_client_order_id_is_rejected_on_the_same_session) {
@@ -376,55 +382,6 @@ TEST(TcpServer, disconnect_triggers_cancel_all_exactly_once) {
     // give the loop room to double-fire if it were going to
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_EQ(calls.load(), 1) << "cancel-all re-fired after the connection was closed";
-}
-
-TEST(TcpServer, cancelled_orders_are_not_cancelled_again_on_disconnect) {
-    std::atomic<std::size_t> reported_orders{999};
-    std::atomic<int> calls{0};
-
-    ServerFixture s([&](SessionId, std::size_t live) {
-        reported_orders.store(live);
-        calls.fetch_add(1);
-    });
-    ASSERT_TRUE(s.started());
-    const int fd = dial(s.port());
-    ASSERT_GE(fd, 0);
-
-    MessageHeader h{};
-    std::vector<std::uint8_t> payload;
-    for (std::uint64_t i = 1; i <= 3; ++i) {
-        const auto frame = valid_new_order(i, 1);
-        ASSERT_EQ(::send(fd, frame.data(), frame.size(), 0), static_cast<ssize_t>(frame.size()));
-        ASSERT_TRUE(read_frame(fd, h, payload));
-    }
-    const auto cancel = encode_frame(MessageType::Cancel, Cancel{2});
-    ASSERT_EQ(::send(fd, cancel.data(), cancel.size(), 0), static_cast<ssize_t>(cancel.size()));
-    ASSERT_TRUE(read_frame(fd, h, payload));
-    ASSERT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Ack));
-
-    ::close(fd);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    EXPECT_EQ(reported_orders.load(), 2u) << "cancelled order still counted at disconnect";
-}
-
-TEST(TcpServer, cancelling_an_unknown_order_is_rejected) {
-    ServerFixture s;
-    ASSERT_TRUE(s.started());
-    const int fd = dial(s.port());
-    ASSERT_GE(fd, 0);
-
-    const auto cancel = encode_frame(MessageType::Cancel, Cancel{424242});
-    ASSERT_EQ(::send(fd, cancel.data(), cancel.size(), 0), static_cast<ssize_t>(cancel.size()));
-
-    MessageHeader h{};
-    std::vector<std::uint8_t> payload;
-    ASSERT_TRUE(read_frame(fd, h, payload));
-    EXPECT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Reject));
-    EXPECT_EQ(decode<Reject>(payload.data(), payload.size())->reason, RejectReason::UNKNOWN_ORDER);
-    ::close(fd);
 }
 
 TEST(TcpServer, sends_heartbeats_on_the_configured_interval) {
