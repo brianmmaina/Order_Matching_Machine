@@ -54,16 +54,34 @@ Excess kurtosis; a normal distribution scores 0.
 
 ## Fact 4 — volatility clustering
 
-Autocorrelation of |1-minute returns|. Positive and slowly decaying means
-large moves cluster in time. Zero-intelligence flow produces none.
+Autocorrelation of |returns|. Positive and slowly decaying means large
+moves cluster in time. Zero-intelligence flow produces none.
 
-| Symbol | lag 1 | lag 2 | lag 5 | lag 10 | lag 20 |
-|---|---|---|---|---|---|
-| AAPL | 0.193 | 0.179 | 0.061 | 0.027 | 0.044 |
-| AMZN | 0.116 | 0.082 | -0.019 | 0.105 | 0.022 |
-| GOOG | 0.169 | 0.141 | -0.003 | 0.003 | -0.003 |
-| INTC | 0.162 | 0.071 | 0.124 | 0.025 | 0.155 |
-| MSFT | 0.029 | 0.144 | 0.077 | 0.059 | 0.051 |
+The `band` column is ±2 standard errors under the null of no
+autocorrelation (2/√n). Values inside it are not distinguishable from
+noise, which is the whole story at the 1-minute horizon.
+
+**1-minute returns** — conventional horizon, but only ~380 observations
+from a single session:
+
+| Symbol | n | band | lag 1 | lag 2 | lag 5 | lag 10 | lag 20 |
+|---|---|---|---|---|---|---|---|
+| AAPL | 389 | ±0.101 | 0.193 | 0.179 | 0.061 | 0.027 | 0.044 |
+| AMZN | 384 | ±0.102 | 0.116 | 0.082 | -0.019 | 0.105 | 0.022 |
+| GOOG | 382 | ±0.102 | 0.169 | 0.141 | -0.003 | 0.003 | -0.003 |
+| INTC | 373 | ±0.104 | 0.162 | 0.071 | 0.124 | 0.025 | 0.155 |
+| MSFT | 381 | ±0.102 | 0.029 | 0.144 | 0.077 | 0.059 | 0.051 |
+
+**10-second returns** — 3-5x the observations, so the band tightens and
+the effect separates from noise at every symbol:
+
+| Symbol | n | band | lag 1 | lag 2 | lag 3 | lag 5 | lag 10 |
+|---|---|---|---|---|---|---|---|
+| AAPL | 2,007 | ±0.045 | 0.139 | 0.118 | 0.109 | 0.114 | 0.037 |
+| AMZN | 1,366 | ±0.054 | 0.155 | 0.087 | 0.098 | 0.036 | 0.078 |
+| GOOG | 1,333 | ±0.055 | 0.217 | 0.127 | 0.164 | 0.045 | 0.061 |
+| INTC | 1,317 | ±0.055 | 0.015 | 0.040 | 0.054 | 0.027 | 0.042 |
+| MSFT | 1,421 | ±0.053 | 0.067 | 0.029 | 0.078 | 0.003 | 0.024 |
 
 ## Fact 5 — effective spread, and the sign-convention check
 
@@ -92,35 +110,71 @@ half of the battery and waits on reconstruction fidelity.
 
 ## What this means for the research plan
 
-R0 was the de-risking step: can 269K–669K messages of one session show these
-effects at all? Verdict per fact:
+R0 was the de-risking step: can a single session show these effects at all?
 
 | Fact | Signal | Usable as a ZI comparison target? |
 |---|---|---|
-| Cancel-to-execution ratio | **Strong** — 91–96% across all five symbols | Yes |
-| Trade-sign autocorrelation | **Strong** — ACF(1) = 0.72–0.91, decaying to ~0 by lag 100 | Yes, and it is the sharpest test |
+| Cancel-to-execution ratio | **Strong** — 91–96%, all five symbols | Yes |
+| Trade-sign autocorrelation | **Strong** — ACF(1) = 0.72–0.91, decays to ~0 by lag 100 | Yes, and it is the sharpest test |
 | Fat-tailed returns | **Strong** — trade-level excess kurtosis 12–24 | Yes |
-| Volatility clustering | **Weak** — ACF(1) = 0.03–0.19, noisy | Marginal; see below |
-| Effective spread | **Strong** — clean, and matches tick structure | Yes, but needs the book to compare properly |
+| Volatility clustering | **Mixed** — significant in AAPL/AMZN/GOOG, absent in INTC/MSFT | Partially, and the split is itself a finding |
+| Effective spread | **Strong** — clean, matches tick structure | Yes, but comparison needs the book |
 | Price impact | **Not measurable** from trades alone | No — needs the book |
 
 **The headline is trade-sign autocorrelation.** ACF(1) between 0.72 and 0.91,
-decaying slowly over ~100 trades, consistent across five symbols spanning very
-different price levels and activity rates. A zero-intelligence model produces
-exactly zero at every lag by construction. That is a clean, unambiguous
-falsification target, and it alone justifies the comparison.
+decaying slowly over ~100 trades, consistent across five symbols spanning $27 to
+$580 and 6 to 29 messages/second. A zero-intelligence model produces exactly
+zero at every lag by construction. That is a clean, unambiguous falsification
+target and it alone justifies the comparison.
 
-**Volatility clustering is the weak one, and the cause is sample size.** One
-session yields only ~380 one-minute return observations. That is too few to
-resolve an autocorrelation reliably, which is why the numbers wander in sign at
-higher lags. Options: use finer buckets (more observations, more microstructure
-noise), obtain more trading days, or report the fact as inconclusive on this
-sample. The third is honest and cheap.
+### Volatility clustering splits by tick constraint
 
-**Price impact was reclassified, and that is R0 earning its cost.** The plan
-listed impact as message-derived and therefore available immediately. It is not.
-The trade-only proxy measures bid-ask bounce, and on the two penny-spread
-symbols it confidently reports that buying pushes price *down*. A correct
-measure needs the mid price, and the mid needs a reconstructed book. Finding
-this now cost one sitting; finding it after building the simulator would have
-cost considerably more and produced a plausible-looking wrong answer.
+At the conventional 1-minute horizon a single session yields ~380 observations,
+where ±2 standard errors is ±0.10 — wide enough to swallow most of the effect.
+That is a power problem, not an absence.
+
+Dropping to 10-second buckets triples the sample and tightens the band to
+±0.05, and the result separates cleanly **but only for three of the five
+symbols**:
+
+- **AAPL, AMZN, GOOG** — ACF(1) of 0.139, 0.155, 0.217 against a ±0.045–0.055
+  band, with positive values persisting to lag 3–5. Clearly present.
+- **INTC, MSFT** — every value at every lag falls *inside* the band. Not
+  detectable at any horizon tried.
+
+The split is not random, and it is not a sample-size artifact: INTC and MSFT
+have the *most* messages of the five. They are the two low-priced names, trading
+near $27 and $30 against a 1-cent minimum tick — the effective spread table
+above shows both pinned at exactly 100 ticks. When price can only move in steps
+that are large relative to its volatility, short-horizon returns are dominated
+by discrete bounce between two levels, and that mechanical component drowns the
+volatility signal.
+
+So the honest statement is: **volatility clustering is measurable here in
+wide-spread names and not in tick-constrained ones, on one session.** That is
+usable as a ZI target for three symbols, and the cross-sectional pattern is
+worth reporting in its own right.
+
+### Would more trading days help?
+
+Only for the weakest fact, and not for the reason it first appeared.
+
+The headline results — cancel ratio, sign autocorrelation, fat tails — are
+already unambiguous and would not change. Volatility clustering in INTC and MSFT
+is where more data would genuinely buy something: many sessions would allow a
+daily-horizon measurement, which is where this effect is conventionally studied
+and where tick constraint stops dominating.
+
+That is a real but narrow gain. It does not block R1–R4, and the LOBSTER free
+sample is one session by design, so obtaining more means either paid academic
+access or parsing raw NASDAQ ITCH. Neither is justified by one marginal
+statistic when the primary comparison target is already this clean.
+
+### Price impact was reclassified, and that is R0 earning its cost
+
+The plan listed impact as message-derived and therefore available immediately.
+It is not. The trade-only proxy measures bid-ask bounce, and on the two
+penny-spread symbols it confidently reports that buying pushes price *down*. A
+correct measure needs the mid price, and the mid needs a reconstructed book.
+Finding this now cost one sitting; finding it after building the simulator would
+have produced a plausible-looking wrong answer.
