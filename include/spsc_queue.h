@@ -63,6 +63,15 @@ public:
         return true;
     }
 
+    // consumer-only: is there anything to pop? lets a consumer poll without
+    // consuming, which the wake-up path needs — it must re-check emptiness
+    // after publishing its intent to park.
+    [[nodiscard]] bool empty() const {
+        const std::size_t t = tail_.load(std::memory_order_relaxed);
+        const std::size_t h = head_.load(std::memory_order_acquire);
+        return t == h;
+    }
+
     // consumer-only: empty queue → null optional; else one element (moved out of the ring).
     [[nodiscard]] std::optional<T> pop() {
         const std::size_t t = tail_.load(std::memory_order_relaxed);

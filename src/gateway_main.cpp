@@ -10,7 +10,9 @@
 #include <iostream>
 #include <string>
 
+#include "ome/matching_thread.hpp"
 #include "ome/tcp_server.hpp"
+#include "ome/waiter.hpp"
 
 namespace {
 
@@ -29,7 +31,8 @@ void usage() {
     std::cerr << "usage: gateway [--port N]\n"
               << "  --port N   listen port (default 9001; 0 = pick any free port)\n"
               << "\n"
-              << "Session 1.2: responds to a valid NewOrder with a hardcoded Ack.\n"
+              << "Runs a network thread and a single matching thread joined by a\n"
+              << "lock-free queue. The book is touched only by the matching thread.\n"
               << "Protocol: docs/PROTOCOL.md. Smoke test: tools/smoke_client.py\n";
 }
 
@@ -67,7 +70,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    ome::TcpServer server(cfg);
+    ome::InboundQueue inbound;
+    ome::Waiter waiter;
+    if (!waiter.valid()) {
+        std::cerr << "failed to create wake-up pipe\n";
+        return 1;
+    }
+    ome::MatchingThread matcher(inbound, waiter);
+
+    ome::TcpServer server(cfg, &inbound, &waiter);
     if (!server.start()) {
         std::cerr << "failed to start: " << server.last_error() << "\n";
         return 1;
@@ -77,10 +88,16 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
+    matcher.start();
+
     std::cout << "gateway listening on 127.0.0.1:" << server.bound_port() << "\n";
     std::cout.flush();
 
     server.run();
+
+    // Network thread first, then the matching thread: stopping the producer
+    // before the consumer means nothing is enqueued that will never be applied.
+    matcher.stop();
 
     if (!server.last_error().empty()) {
         std::cerr << "event loop error: " << server.last_error() << "\n";

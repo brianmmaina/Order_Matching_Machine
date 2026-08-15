@@ -93,6 +93,7 @@ if(BUILD_TESTING)
     tests/test_framing.cpp
     tests/test_tcp_server.cpp
     tests/test_session.cpp
+    tests/test_pipeline.cpp
   )
   target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main Threads::Threads)
 
