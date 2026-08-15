@@ -290,3 +290,28 @@ TEST(WriteBuffer, empty_append_is_a_noop_and_succeeds) {
     EXPECT_TRUE(wb.append(nullptr, 0));
     EXPECT_TRUE(wb.empty());
 }
+
+// --- regression from code review -------------------------------------------
+
+TEST(WriteBuffer, memory_held_stays_within_the_configured_cap) {
+    // REGRESSION: the capacity check counted only unsent bytes, so the
+    // consumed-but-not-compacted prefix sat above the cap. With a small
+    // configured cap that is a large overshoot of actual allocation.
+    WriteBuffer wb(64);
+    const std::vector<std::uint8_t> chunk(32, 0xCD);
+
+    // Churn far more bytes than the cap, always draining what we appended.
+    for (int i = 0; i < 1000; ++i) {
+        ASSERT_TRUE(wb.append(chunk)) << "append refused at iteration " << i;
+        wb.consume(wb.pending());
+    }
+    EXPECT_TRUE(wb.empty());
+
+    // Interleave partial drains so a consumed prefix is always present.
+    for (int i = 0; i < 1000; ++i) {
+        ASSERT_TRUE(wb.append(chunk));
+        wb.consume(16);
+        wb.consume(wb.pending());
+    }
+    EXPECT_TRUE(wb.empty());
+}

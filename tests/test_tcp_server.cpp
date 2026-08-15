@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "ome/protocol.hpp"
+#include "ome/session.hpp"
 #include "ome/tcp_server.hpp"
 
 using namespace ome;
@@ -33,11 +34,15 @@ namespace {
 // Starts a server on its own thread and tears it down on destruction.
 class ServerFixture {
 public:
-    ServerFixture() {
+    explicit ServerFixture(TcpServer::CancelAllHook hook = nullptr, SessionConfig scfg = {}) {
         TcpServerConfig cfg{};
         cfg.port = 0;               // ephemeral
         cfg.poll_timeout_ms = 10;   // keep stop() responsive
+        cfg.session = scfg;
         server_ = std::make_unique<TcpServer>(cfg);
+        if (hook) {
+            server_->set_cancel_all_hook(std::move(hook));
+        }
         started_ = server_->start();
         if (started_) {
             port_ = server_->bound_port();
@@ -279,5 +284,275 @@ TEST(TcpServer, survives_abrupt_disconnects_garbage_and_churn) {
     ASSERT_TRUE(read_frame(fd, h, payload));
     EXPECT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Ack));
     EXPECT_EQ(decode<Ack>(payload.data(), payload.size())->client_order_id, 777u);
+    ::close(fd);
+}
+
+
+// --- session lifecycle over a real socket ----------------------------------
+
+TEST(TcpServer, duplicate_client_order_id_is_rejected_on_the_same_session) {
+    ServerFixture s;
+    ASSERT_TRUE(s.started());
+    const int fd = dial(s.port());
+    ASSERT_GE(fd, 0);
+
+    const auto frame = valid_new_order(5, 1);
+    ASSERT_EQ(::send(fd, frame.data(), frame.size(), 0), static_cast<ssize_t>(frame.size()));
+    MessageHeader h{};
+    std::vector<std::uint8_t> payload;
+    ASSERT_TRUE(read_frame(fd, h, payload));
+    ASSERT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Ack));
+
+    // same client_order_id again
+    ASSERT_EQ(::send(fd, frame.data(), frame.size(), 0), static_cast<ssize_t>(frame.size()));
+    ASSERT_TRUE(read_frame(fd, h, payload));
+    EXPECT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Reject));
+    EXPECT_EQ(decode<Reject>(payload.data(), payload.size())->reason,
+              RejectReason::DUPLICATE_ORDER_ID);
+    ::close(fd);
+}
+
+TEST(TcpServer, the_same_client_order_id_is_fine_on_a_different_session) {
+    ServerFixture s;
+    ASSERT_TRUE(s.started());
+
+    const int a = dial(s.port());
+    const int b = dial(s.port());
+    ASSERT_GE(a, 0);
+    ASSERT_GE(b, 0);
+
+    const auto frame = valid_new_order(1, 1);
+    MessageHeader h{};
+    std::vector<std::uint8_t> payload;
+
+    ASSERT_EQ(::send(a, frame.data(), frame.size(), 0), static_cast<ssize_t>(frame.size()));
+    ASSERT_TRUE(read_frame(a, h, payload));
+    EXPECT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Ack));
+
+    ASSERT_EQ(::send(b, frame.data(), frame.size(), 0), static_cast<ssize_t>(frame.size()));
+    ASSERT_TRUE(read_frame(b, h, payload));
+    EXPECT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Ack))
+        << "id space leaked between sessions";
+
+    ::close(a);
+    ::close(b);
+}
+
+TEST(TcpServer, disconnect_triggers_cancel_all_exactly_once) {
+    // The behavior session 1.4 turns into a real CancelAllForSession command.
+    // Several paths can notice one death in the same loop iteration, so "once"
+    // is the property that matters, not merely "at least once".
+    std::atomic<int> calls{0};
+    std::atomic<std::size_t> reported_orders{0};
+
+    ServerFixture s([&](SessionId, std::size_t live) {
+        reported_orders.store(live);
+        calls.fetch_add(1);
+    });
+    ASSERT_TRUE(s.started());
+
+    const int fd = dial(s.port());
+    ASSERT_GE(fd, 0);
+
+    // rest two orders so the cancel-all has something to report
+    for (std::uint64_t i = 1; i <= 2; ++i) {
+        const auto frame = valid_new_order(i, 1);
+        ASSERT_EQ(::send(fd, frame.data(), frame.size(), 0), static_cast<ssize_t>(frame.size()));
+        MessageHeader h{};
+        std::vector<std::uint8_t> payload;
+        ASSERT_TRUE(read_frame(fd, h, payload));
+        ASSERT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Ack));
+    }
+
+    ::close(fd);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(calls.load(), 1) << "cancel-all fired " << calls.load() << " times";
+    EXPECT_EQ(reported_orders.load(), 2u) << "wrong live-order count at disconnect";
+
+    // give the loop room to double-fire if it were going to
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(calls.load(), 1) << "cancel-all re-fired after the connection was closed";
+}
+
+TEST(TcpServer, cancelled_orders_are_not_cancelled_again_on_disconnect) {
+    std::atomic<std::size_t> reported_orders{999};
+    std::atomic<int> calls{0};
+
+    ServerFixture s([&](SessionId, std::size_t live) {
+        reported_orders.store(live);
+        calls.fetch_add(1);
+    });
+    ASSERT_TRUE(s.started());
+    const int fd = dial(s.port());
+    ASSERT_GE(fd, 0);
+
+    MessageHeader h{};
+    std::vector<std::uint8_t> payload;
+    for (std::uint64_t i = 1; i <= 3; ++i) {
+        const auto frame = valid_new_order(i, 1);
+        ASSERT_EQ(::send(fd, frame.data(), frame.size(), 0), static_cast<ssize_t>(frame.size()));
+        ASSERT_TRUE(read_frame(fd, h, payload));
+    }
+    const auto cancel = encode_frame(MessageType::Cancel, Cancel{2});
+    ASSERT_EQ(::send(fd, cancel.data(), cancel.size(), 0), static_cast<ssize_t>(cancel.size()));
+    ASSERT_TRUE(read_frame(fd, h, payload));
+    ASSERT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Ack));
+
+    ::close(fd);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(reported_orders.load(), 2u) << "cancelled order still counted at disconnect";
+}
+
+TEST(TcpServer, cancelling_an_unknown_order_is_rejected) {
+    ServerFixture s;
+    ASSERT_TRUE(s.started());
+    const int fd = dial(s.port());
+    ASSERT_GE(fd, 0);
+
+    const auto cancel = encode_frame(MessageType::Cancel, Cancel{424242});
+    ASSERT_EQ(::send(fd, cancel.data(), cancel.size(), 0), static_cast<ssize_t>(cancel.size()));
+
+    MessageHeader h{};
+    std::vector<std::uint8_t> payload;
+    ASSERT_TRUE(read_frame(fd, h, payload));
+    EXPECT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Reject));
+    EXPECT_EQ(decode<Reject>(payload.data(), payload.size())->reason, RejectReason::UNKNOWN_ORDER);
+    ::close(fd);
+}
+
+TEST(TcpServer, sends_heartbeats_on_the_configured_interval) {
+    SessionConfig fast{};
+    fast.heartbeat_interval_ns = 20ULL * 1000 * 1000;  // 20ms
+    fast.timeout_ns = 60ULL * 60 * 1000 * 1000 * 1000; // effectively never
+
+    ServerFixture s(nullptr, fast);
+    ASSERT_TRUE(s.started());
+    const int fd = dial(s.port());
+    ASSERT_GE(fd, 0);
+
+    for (int i = 0; i < 2; ++i) {
+        MessageHeader h{};
+        std::vector<std::uint8_t> payload;
+        ASSERT_TRUE(read_frame(fd, h, payload)) << "no heartbeat " << i;
+        EXPECT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Heartbeat));
+        EXPECT_TRUE(decode<Heartbeat>(payload.data(), payload.size()).has_value());
+    }
+    ::close(fd);
+}
+
+TEST(TcpServer, silent_session_times_out_and_fires_cancel_all) {
+    SessionConfig fast{};
+    fast.heartbeat_interval_ns = 5ULL * 1000 * 1000;   // 5ms
+    fast.timeout_ns = 40ULL * 1000 * 1000;             // 40ms
+
+    std::atomic<int> calls{0};
+    ServerFixture s([&](SessionId, std::size_t) { calls.fetch_add(1); }, fast);
+    ASSERT_TRUE(s.started());
+
+    const int fd = dial(s.port());
+    ASSERT_GE(fd, 0);
+    // connect and say nothing at all
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(calls.load(), 1) << "silent session was not swept exactly once";
+    ::close(fd);
+}
+
+// --- regressions from code review ------------------------------------------
+
+TEST(TcpServer, slow_consumer_that_never_reads_is_disconnected) {
+    // REGRESSION. The close gate was `want_close && writer.empty()`, which is
+    // unsatisfiable in exactly the case that sets want_close: the buffer is
+    // full *because* the peer is not reading, so waiting for it to drain waits
+    // forever. The abusive connection was the only one that never got dropped,
+    // inverting the documented slow-consumer policy.
+    std::atomic<int> cancels{0};
+
+    TcpServerConfig cfg{};
+    cfg.port = 0;
+    cfg.poll_timeout_ms = 5;
+    // The cap matters less than you would expect: the kernel's own socket
+    // buffers absorb well over a megabyte before our WriteBuffer sees any
+    // pressure at all, so the order count below is what actually drives this.
+    cfg.max_write_buffer = 4096;
+    TcpServer server(cfg);
+    ASSERT_TRUE(server.start());
+    server.set_cancel_all_hook([&](SessionId, std::size_t) { cancels.fetch_add(1); });
+    const std::uint16_t port = server.bound_port();
+    std::thread th([&] { server.run(); });
+
+    const int fd = dial(port);
+    ASSERT_GE(fd, 0);
+    // Shrink our receive window so the server's sends back up quickly.
+    const int rcvbuf = 2048;
+    static_cast<void>(::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)));
+
+    // Flood orders and never read a single ack. Enough of them to fill the
+    // kernel buffers on both sides AND overflow our cap; measured empirically
+    // at ~74k on this platform, so 200k leaves real headroom.
+    //
+    // SIGPIPE is suppressed per-socket rather than ignored process-wide, so a
+    // send to a server that has already dropped us returns EPIPE instead of
+    // killing the test binary.
+#ifdef SO_NOSIGPIPE
+    const int nosig = 1;
+    static_cast<void>(::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig)));
+#endif
+    for (std::uint64_t i = 1; i <= 200000; ++i) {
+        const auto frame = valid_new_order(i, 1);
+#ifdef MSG_NOSIGNAL
+        const ssize_t sent = ::send(fd, frame.data(), frame.size(), MSG_NOSIGNAL);
+#else
+        const ssize_t sent = ::send(fd, frame.data(), frame.size(), 0);
+#endif
+        if (sent < 0) {
+            break;  // server dropped us, which is exactly the point
+        }
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (cancels.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(cancels.load(), 1) << "slow consumer was never disconnected";
+
+    server.stop();
+    th.join();
+    ::close(fd);
+}
+
+TEST(TcpServer, unimplemented_messages_reject_with_not_implemented) {
+    // REGRESSION: these answered MALFORMED with client_order_id 0, which told
+    // a client its correct message was garbage and did not say which order.
+    ServerFixture s;
+    ASSERT_TRUE(s.started());
+    const int fd = dial(s.port());
+    ASSERT_GE(fd, 0);
+
+    Modify m{};
+    m.client_order_id = 4321;
+    m.new_price_ticks = 1000000;
+    m.new_quantity = 5;
+    const auto frame = encode_frame(MessageType::Modify, m);
+    ASSERT_EQ(::send(fd, frame.data(), frame.size(), 0), static_cast<ssize_t>(frame.size()));
+
+    MessageHeader h{};
+    std::vector<std::uint8_t> payload;
+    ASSERT_TRUE(read_frame(fd, h, payload));
+    ASSERT_EQ(h.type, static_cast<std::uint16_t>(MessageType::Reject));
+    const auto rej = decode<Reject>(payload.data(), payload.size());
+    ASSERT_TRUE(rej.has_value());
+    EXPECT_EQ(rej->reason, RejectReason::NOT_IMPLEMENTED);
+    EXPECT_EQ(rej->client_order_id, 4321u) << "rejection did not identify the order";
     ::close(fd);
 }

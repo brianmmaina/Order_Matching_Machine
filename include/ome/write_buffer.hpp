@@ -58,6 +58,15 @@ public:
         if (pending() + size > capacity_) {
             return false;
         }
+        // The cap is on MEMORY HELD, not just unsent bytes. Without this, the
+        // consumed-but-not-yet-compacted prefix sits above the cap: allocation
+        // reaches capacity_ + kCompactThreshold, which is a 17x overshoot when
+        // a small cap is configured. Compact instead of refusing, since the
+        // bytes we would be counting are already delivered.
+        if (buf_.size() + size > capacity_ && pos_ > 0) {
+            buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(pos_));
+            pos_ = 0;
+        }
         buf_.insert(buf_.end(), data, data + size);
         return true;
     }
