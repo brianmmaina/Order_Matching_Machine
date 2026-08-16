@@ -1,5 +1,16 @@
 # Zero-intelligence order flow vs. real order flow
 
+> **This document tests claims no published model makes.** It is kept because
+> the measurements are sound and the negative result is real, but it should not
+> be read as a test of Farmer/Patelli/Zovko (2005). That model is Poisson with
+> uniform order deposition and has no autocorrelated order flow by
+> construction; it never claimed to reproduce the stylized facts below, and the
+> paper explicitly warns against the single-stock design used here. The actual
+> replication is in **[FARMER_2005.md](FARMER_2005.md)**.
+>
+> Read this as an independent ZI baseline: what a calibrated random-order-flow
+> market does and does not look like. Nothing here inherits a paper's authority.
+
 Synthetic order flow, calibrated to AMZN (`docs/CALIBRATION.md`) and matched by
 the same `MatchingEngine` the gateway uses, compared against the real LOBSTER
 stream.
@@ -113,6 +124,10 @@ Preserved behind `--adaptive-scale` so the failure stays reproducible.
 - **Hidden liquidity is not modelled** — 21% of real executions.
 - **The calibrated cancel rate is an overestimate by construction**
   (`docs/CALIBRATION.md`).
-- **Not a faithful reimplementation of any published model.** It is a
-  zero-intelligence model in the Farmer/Patelli/Zovko spirit, calibrated to this
-  data, not a reproduction of their specification.
+- **Not a reimplementation of any published model, and not a test of one.**
+  This model uses an empirical size distribution and an empirical placement
+  histogram, so it is strictly richer than the Farmer/Patelli/Zovko
+  specification (single order size, uniform deposition on a semi-infinite
+  interval) and their scaling laws do not apply to it. The statistics measured
+  above are not ones that paper predicts. See
+  [FARMER_2005.md](FARMER_2005.md) for the replication that does test it.
