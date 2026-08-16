@@ -337,6 +337,56 @@ bool OrderBook::best_ask_ticks(std::int64_t& out) const noexcept {
     return true;
 }
 
+namespace {
+
+// FNV-1a, 64-bit. Chosen for being trivial to state and to reimplement: the
+// independent verifier in session 2.4 has to compute the same digest from the
+// WAL using its own book, and a hash nobody can reproduce from the description
+// would defeat the point of an independent check.
+constexpr std::uint64_t kFnvOffset = 1469598103934665603ULL;
+constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+
+void mix(std::uint64_t& h, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+        h ^= (v >> (8 * i)) & 0xFFu;
+        h *= kFnvPrime;
+    }
+}
+
+}  // namespace
+
+std::uint64_t OrderBook::digest() const {
+    std::uint64_t h = kFnvOffset;
+    // Side tags are mixed in so that a book with levels on the bid cannot
+    // collide with the mirror-image book on the ask.
+    for (const auto* side : {&bids_, &asks_}) {
+        mix(h, side == &bids_ ? 1u : 2u);
+        mix(h, side->size());
+        for (const auto& lvl : *side) {
+            mix(h, static_cast<std::uint64_t>(lvl.price_ticks));
+            mix(h, lvl.total_qty);
+            // Order count matters: one order of 100 and two of 50 are the same
+            // aggregate depth but different books, and they behave differently
+            // on the next partial fill.
+            mix(h, lvl.orders.size());
+        }
+    }
+    return h;
+}
+
+std::string OrderBook::debug_dump() const {
+    std::string out;
+    for (const auto* side : {&bids_, &asks_}) {
+        out += (side == &bids_) ? "BIDS\n" : "ASKS\n";
+        for (const auto& lvl : *side) {
+            out += "  ticks=" + std::to_string(lvl.price_ticks) +
+                   " qty=" + std::to_string(lvl.total_qty) +
+                   " orders=" + std::to_string(lvl.orders.size()) + "\n";
+        }
+    }
+    return out;
+}
+
 bool OrderBook::levels_consistent() const {
     for (const auto* book : {&bids_, &asks_}) {
         for (const auto& lvl : *book) {
