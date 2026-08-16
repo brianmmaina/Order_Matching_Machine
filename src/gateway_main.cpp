@@ -4,6 +4,7 @@
 // The matching engine is wired in session 1.4.
 
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <cstdlib>
@@ -12,6 +13,7 @@
 
 #include "ome/matching_thread.hpp"
 #include "ome/risk_config.hpp"
+#include "ome/wal.hpp"
 #include "ome/tcp_server.hpp"
 #include "ome/waiter.hpp"
 
@@ -32,6 +34,8 @@ void usage() {
     std::cerr << "usage: gateway [--port N]\n"
               << "  --port N   listen port (default 9001; 0 = pick any free port)\n"
               << "  --risk F   risk limits from a key=value file (see config/risk.conf)\n"
+              << "  --wal F    append commands to a write-ahead log at F\n"
+              << "  --wal-no-fullsync  weaker durability, much lower tail latency\n"
               << "\n"
               << "Runs a network thread and a single matching thread joined by a\n"
               << "lock-free queue. The book is touched only by the matching thread.\n"
@@ -42,12 +46,22 @@ void usage() {
 
 int main(int argc, char** argv) {
     ome::TcpServerConfig cfg{};
+    std::string wal_path;
+    ome::WalConfig wal_cfg{};
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--help") {
             usage();
             return 0;
+        }
+        if (arg == "--wal" && i + 1 < argc) {
+            wal_path = argv[++i];
+            continue;
+        }
+        if (arg == "--wal-no-fullsync") {
+            wal_cfg.full_sync = false;
+            continue;
         }
         if (arg == "--risk" && i + 1 < argc) {
             std::string err;
@@ -91,7 +105,19 @@ int main(int argc, char** argv) {
         std::cerr << "failed to create egress wake-up pipe\n";
         return 1;
     }
-    ome::MatchingThread matcher(inbound, waiter, cfg.risk, &egress_ready);
+    ome::Wal wal;
+    if (!wal_path.empty()) {
+        const auto now = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (!wal.open(wal_path, now, 0, wal_cfg)) {
+            std::cerr << wal.error() << "\n";
+            return 1;
+        }
+        std::cout << "write-ahead log: " << wal_path << "\n";
+    }
+    ome::MatchingThread matcher(inbound, waiter, cfg.risk, &egress_ready,
+                                wal.is_open() ? &wal : nullptr);
 
     ome::TcpServer server(cfg, &inbound, &waiter, &egress_ready);
     if (!server.start()) {
