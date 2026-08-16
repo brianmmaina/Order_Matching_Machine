@@ -96,6 +96,12 @@ public:
     // the question is where. Ordering matches digest() exactly.
     [[nodiscard]] std::string debug_dump() const;
 
+    // Every resting order, in book order: bids best-first then asks best-first,
+    // and within a level in time priority. Replaying these through addOrder in
+    // this order rebuilds the identical book, which is what makes a snapshot a
+    // snapshot rather than an approximation.
+    [[nodiscard]] std::vector<Order> all_orders() const;
+
     // aggregated sizes per price level, best levels first. prices are already ticks.
     [[nodiscard]] std::vector<std::pair<std::int64_t, std::uint64_t>> bid_levels_ticks(
         std::size_t max_levels) const;
