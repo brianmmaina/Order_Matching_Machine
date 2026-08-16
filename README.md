@@ -72,6 +72,20 @@ kill -9 $(pgrep -f 'build/gateway')
 # book digest after recovery: ...
 ```
 
+With periodic snapshots, recovery reads state rather than history:
+
+```bash
+./build/gateway --wal /tmp/ome.wal --snapshot /tmp/ome.snap \
+                --snapshot-every 100000 --port 9001
+# ... after a kill:
+./build/gateway --wal /tmp/ome.wal --snapshot /tmp/ome.snap --recover --port 9001
+# restored 8020 orders from snapshot at seq 8020
+# recovered 1580 commands, last seq 9600
+```
+
+The WAL is compacted behind each snapshot, so it holds the tail rather than the
+whole history — 1,580 records instead of 9,600 above.
+
 Needs network once on first configure (GoogleTest via FetchContent). Build type
 defaults to Release. Builds with `-Wall -Wextra -Werror`.
 
@@ -229,7 +243,7 @@ book at all.
 **Snapshots pause the matching thread** — 28 ms at 100K resting orders. The fix
 is measured and known (the copy is 2.2 ms while the write is 26 ms, so
 serializing a copy on a background thread would remove most of it) and not yet
-implemented.
+implemented. Snapshots are off unless `--snapshot` is given.
 
 **Cancel-on-disconnect is O(orders held).** A session disconnecting with a very
 large book blocks the matching thread for the sweep.

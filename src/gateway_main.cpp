@@ -14,6 +14,7 @@
 
 #include "ome/matching_thread.hpp"
 #include "ome/risk_config.hpp"
+#include "ome/snapshot.hpp"
 #include "ome/wal.hpp"
 #include "ome/tcp_server.hpp"
 #include "ome/waiter.hpp"
@@ -38,6 +39,8 @@ void usage() {
               << "  --wal F    append commands to a write-ahead log at F\n"
               << "  --wal-no-fullsync  weaker durability, much lower tail latency\n"
               << "  --recover  replay the log at startup before accepting clients\n"
+              << "  --snapshot F        periodic book snapshots at F (bounds recovery time)\n"
+              << "  --snapshot-every N  commands between snapshots (default 100000)\n"
               << "\n"
               << "Runs a network thread and a single matching thread joined by a\n"
               << "lock-free queue. The book is touched only by the matching thread.\n"
@@ -51,6 +54,8 @@ int main(int argc, char** argv) {
     std::string wal_path;
     ome::WalConfig wal_cfg{};
     bool recover = false;
+    std::string snap_path;
+    std::uint64_t snap_every = 100000;
     std::vector<ome::OrderCommand> pending_recovery;
 
     for (int i = 1; i < argc; ++i) {
@@ -61,6 +66,14 @@ int main(int argc, char** argv) {
         }
         if (arg == "--wal" && i + 1 < argc) {
             wal_path = argv[++i];
+            continue;
+        }
+        if (arg == "--snapshot" && i + 1 < argc) {
+            snap_path = argv[++i];
+            continue;
+        }
+        if (arg == "--snapshot-every" && i + 1 < argc) {
+            snap_every = std::strtoull(argv[++i], nullptr, 10);
             continue;
         }
         if (arg == "--recover") {
@@ -115,6 +128,28 @@ int main(int argc, char** argv) {
     }
     ome::Wal wal;
     std::uint64_t resume_seq = 0;
+    ome::SnapshotData snap_data{};
+    bool have_snapshot = false;
+
+    // Newest snapshot first, then the one kept behind it. A snapshot that fails
+    // its checksum is not fatal — falling back to full replay is slower but
+    // correct, and refusing to start would turn a recoverable situation into an
+    // outage.
+    if (!snap_path.empty() && recover) {
+        std::string err;
+        if (ome::read_snapshot(snap_path, snap_data, err)) {
+            have_snapshot = true;
+        } else {
+            std::cout << "snapshot unusable (" << err << "), trying previous\n";
+            if (ome::read_snapshot(snap_path + ".prev", snap_data, err)) {
+                have_snapshot = true;
+                std::cout << "using the previous snapshot\n";
+            } else {
+                std::cout << "no usable snapshot, replaying the whole log\n";
+            }
+        }
+    }
+
     if (!wal_path.empty() && recover) {
         const auto rd = ome::read_wal(wal_path);
         if (!rd.error.empty()) {
@@ -129,8 +164,16 @@ int main(int argc, char** argv) {
                           << " in " << wal_path << "\n";
                 return 1;
             }
-            pending_recovery = rd.commands;
-            resume_seq = rd.last_seq;
+            // Skip what the snapshot already covers. Sequence numbers are
+            // preserved across truncation precisely so this comparison works.
+            std::uint64_t seq = rd.first_seq;
+            for (const auto& c : rd.commands) {
+                if (!have_snapshot || seq > snap_data.last_seq) {
+                    pending_recovery.push_back(c);
+                }
+                ++seq;
+            }
+            resume_seq = rd.last_seq > snap_data.last_seq ? rd.last_seq : snap_data.last_seq;
             const std::size_t n = pending_recovery.size();
             std::cout << "recovered " << n << " commands, last seq " << rd.last_seq;
             if (rd.truncated_bytes > 0) {
@@ -149,8 +192,11 @@ int main(int argc, char** argv) {
         }
         std::cout << "write-ahead log: " << wal_path << "\n";
     }
+    ome::SnapshotPolicy snap_policy{};
+    snap_policy.path = snap_path;
+    snap_policy.every_n = snap_every;
     ome::MatchingThread matcher(inbound, waiter, cfg.risk, &egress_ready,
-                                wal.is_open() ? &wal : nullptr);
+                                wal.is_open() ? &wal : nullptr, snap_policy);
 
     ome::TcpServer server(cfg, &inbound, &waiter, &egress_ready);
     if (!server.start()) {
@@ -162,10 +208,20 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
+    if (have_snapshot) {
+        matcher.restore(snap_data);
+        matcher.set_snapshot_baseline(snap_data.last_seq);
+        std::cout << "restored " << snap_data.orders.size() << " orders from snapshot at seq "
+                  << snap_data.last_seq << "\n";
+    }
     if (!pending_recovery.empty()) {
         // Before start(): recovery runs on this thread, so nothing races the
         // book while it is being rebuilt.
         matcher.recover(pending_recovery);
+    }
+    if (recover) {
+        // Printed whenever recovery ran, including when the snapshot covered
+        // everything and the tail was empty.
         std::cout << "book digest after recovery: " << matcher.digest() << "\n";
     }
     matcher.start();

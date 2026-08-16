@@ -25,11 +25,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <string>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <unordered_set>
 #include <vector>
 
@@ -46,6 +48,11 @@
 
 namespace ome {
 
+struct SnapshotPolicy {
+    std::string path;            // empty disables snapshotting
+    std::uint64_t every_n = 0;   // commands between snapshots; 0 disables
+};
+
 inline constexpr std::size_t kInboundCapacity = 8192;
 using InboundQueue = SpscQueue<OrderCommand, kInboundCapacity>;
 
@@ -55,15 +62,18 @@ struct MatchingStats {
     std::uint64_t egress_overflows{0};
     std::uint64_t wal_failures{0};
     std::uint64_t market_data_dropped{0};
+    std::uint64_t snapshots{0};
+    std::uint64_t snapshot_failures{0};
     std::uint64_t sessions_retired{0};
 };
 
 class MatchingThread {
 public:
     MatchingThread(InboundQueue& inbound, Waiter& waiter, RiskConfig risk = {},
-                   Notifier* egress_ready = nullptr, Wal* wal = nullptr)
+                   Notifier* egress_ready = nullptr, Wal* wal = nullptr,
+                   SnapshotPolicy snap = {})
         : inbound_(inbound), waiter_(waiter), egress_ready_(egress_ready), wal_(wal),
-          risk_(risk) {}
+          risk_(risk), snap_(std::move(snap)) {}
 
     MatchingThread(const MatchingThread&) = delete;
     MatchingThread& operator=(const MatchingThread&) = delete;
@@ -157,6 +167,13 @@ public:
     // is time priority within each level — so addOrder reconstructs the same
     // book. The ownership maps are rebuilt alongside, otherwise a cancel
     // arriving after recovery would find nothing.
+    // Called after restore() so the first snapshot is not taken immediately on
+    // a restart that already loaded one.
+    void set_snapshot_baseline(std::uint64_t seq) {
+        last_snapshot_seq_ = seq;
+        next_snapshot_at_ = seq + snap_.every_n;
+    }
+
     void restore(const SnapshotData& d) {
         last_trade_ticks_ = d.last_trade_ticks;
         next_exchange_id_ = d.next_exchange_id;
@@ -228,7 +245,47 @@ private:
         if (applied > 0 && wal_ != nullptr) {
             wal_->poll_sync(monotonic_ns());
         }
+        // BETWEEN batches, never mid-batch: the snapshot must reflect a
+        // consistent point in the command stream, and the WAL sequence it
+        // records has to line up with a command boundary or recovery would
+        // replay a partially applied batch.
+        maybe_snapshot();
         return applied;
+    }
+
+    // Pause-the-world: the matching thread writes the snapshot itself and stops
+    // matching while it does. Measured at 28ms for 100k resting orders — see
+    // docs/BENCHMARK.md for why the fix is to move the WRITE off this thread
+    // rather than the copy.
+    void maybe_snapshot() {
+        if (snap_.path.empty() || snap_.every_n == 0 || wal_ == nullptr) {
+            return;
+        }
+        const std::uint64_t seq = wal_->last_seq();
+        if (seq < next_snapshot_at_) {
+            return;
+        }
+
+        // Keep the previous snapshot: if a crash lands while the new one is
+        // being written, rename() guarantees the old file is intact, and
+        // recovery falls back to it. The WAL is only truncated up to the
+        // PREVIOUS snapshot's sequence, so the older snapshot still has the
+        // records it needs.
+        const std::string prev = snap_.path + ".prev";
+        static_cast<void>(::rename(snap_.path.c_str(), prev.c_str()));
+
+        std::string err;
+        if (!write_snapshot(snap_.path, export_snapshot(seq), err)) {
+            ++stats_.snapshot_failures;
+            return;
+        }
+        if (last_snapshot_seq_ > 0) {
+            std::string terr;
+            static_cast<void>(wal_->truncate_before(last_snapshot_seq_, terr));
+        }
+        last_snapshot_seq_ = seq;
+        next_snapshot_at_ = seq + snap_.every_n;
+        ++stats_.snapshots;
     }
 
     void apply(const OrderCommand& c) {
@@ -652,6 +709,9 @@ private:
     std::unordered_map<std::uint64_t, std::uint64_t> by_client_id_;
 
     RiskConfig risk_;
+    SnapshotPolicy snap_;
+    std::uint64_t next_snapshot_at_{0};
+    std::uint64_t last_snapshot_seq_{0};
     // Reference for the price band. 0 means "no trade yet", which falls back to
     // the mid and then to accepting anything.
     std::int64_t last_trade_ticks_{0};
