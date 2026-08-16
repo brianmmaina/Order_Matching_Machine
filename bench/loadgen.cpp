@@ -78,6 +78,12 @@ struct Config {
     double warmup_s = 2.0;
     int workers = 0;  // 0 = auto
     bool csv = false;
+    // Quote crossing prices so orders actually match. Off by default because
+    // the latency sweep wants orders to rest (a crossing workload also returns
+    // fills, changing both the work done and the message count). On for the
+    // kill test, which has to exercise the matching path or it only verifies
+    // that two implementations can both accumulate a book.
+    bool cross = false;
 };
 
 struct Sample {
@@ -149,8 +155,16 @@ void run_worker(const Config& cfg, std::vector<Client>& clients, std::uint64_t s
                 // cross rather than piling up on one side, which would make
                 // the book grow without bound and change what is measured.
                 const bool bid = (m.client_order_id % 2) == 0;
-                m.price_ticks = 1000000 + (bid ? -100 : 100);
-                m.quantity = 10;
+                // resting: bid below ask, nothing matches.
+                // crossing: bid ABOVE ask, so every pair trades.
+                m.price_ticks = cfg.cross ? (1000000 + (bid ? 100 : -100))
+                                          : (1000000 + (bid ? -100 : 100));
+                // Under --cross, vary size so pairs only partially fill. Equal
+                // sizes would trade away completely and leave an empty book,
+                // and a digest comparison on an empty book verifies very little.
+                m.quantity = cfg.cross
+                                 ? static_cast<std::uint32_t>(5 + (m.client_order_id % 7) * 3)
+                                 : 10;
                 m.side = bid ? ome::protocol::Side::Bid : ome::protocol::Side::Ask;
                 m.order_type = ome::protocol::OrderType::Limit;
 
@@ -259,7 +273,8 @@ void usage() {
                  "              for acks, so offered load is clients * rate)\n"
                  "  --warmup S  seconds excluded from statistics, by SEND time\n"
                  "  --workers N connection-driving threads (default: min(clients, cores))\n"
-                 "  --csv       one CSV row instead of a human-readable block\n");
+                 "  --csv       one CSV row instead of a human-readable block\n"
+                 "  --cross     quote crossing prices so orders match (kill test)\n");
 }
 
 }  // namespace
@@ -278,6 +293,7 @@ int main(int argc, char** argv) {
         else if (a == "--warmup") cfg.warmup_s = std::atof(next().c_str());
         else if (a == "--workers") cfg.workers = std::atoi(next().c_str());
         else if (a == "--csv") cfg.csv = true;
+        else if (a == "--cross") cfg.cross = true;
         else { std::fprintf(stderr, "unknown argument: %s\n", a.c_str()); usage(); return 1; }
     }
     if (cfg.clients <= 0 || cfg.rate_per_client <= 0 || cfg.duration_s <= 0) {
