@@ -454,23 +454,23 @@ def report_regression(name, r, markdown=False):
         print("  confirmation.")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--symbols", default="AAPL,AMZN,GOOG,INTC,MSFT")
-    ap.add_argument("--skip-open", type=float, default=0.0,
-                    help="seconds of the session to skip; the paper excludes the "
-                         "opening auction, which LOBSTER samples already omit")
-    ap.add_argument("--markdown", action="store_true")
-    args = ap.parse_args()
+def measure_all(symbols, skip_open=0.0, verbose=True):
+    """Measure every symbol. Shared with analysis/validate_scaling.py.
 
+    The simulator must run on exactly the parameters the empirical test used,
+    or a difference in the measurement would look like a difference in the
+    model. Same reason analysis/compare.py imports stylized_facts rather than
+    reimplementing it.
+    """
     rows = []
-    for sym in [s.strip().upper() for s in args.symbols.split(",") if s.strip()]:
+    for sym in symbols:
         m, b = find_pair(sym)
         if not m or not b:
             print(f"skipping {sym}: no message/orderbook pair", file=sys.stderr)
             continue
-        print(f"scanning {sym} ...", file=sys.stderr)
-        s = scan(sym, m, b, args.skip_open)
+        if verbose:
+            print(f"scanning {sym} ...", file=sys.stderr)
+        s = scan(sym, m, b, skip_open)
         p = parameters(s)
         eps, p_c, s_hat, d_hat = predict(p)
         s_real = (sum(s["spreads"]) / len(s["spreads"])) if s["spreads"] else float("nan")
@@ -494,12 +494,25 @@ def main():
                      "s_real": s_real, "d_real": d_real, "n_mid": len(s["mids"]),
                      "price": mm / 10000.0, "dp_log": dp_log,
                      "tick_ratio": tick_ratio})
+    rows.sort(key=lambda r: r["tick_ratio"])
+    return rows
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--symbols", default="AAPL,AMZN,GOOG,INTC,MSFT")
+    ap.add_argument("--skip-open", type=float, default=0.0,
+                    help="seconds of the session to skip; the paper excludes the "
+                         "opening auction, which LOBSTER samples already omit")
+    ap.add_argument("--markdown", action="store_true")
+    args = ap.parse_args()
+
+    rows = measure_all([x.strip().upper() for x in args.symbols.split(",") if x.strip()],
+                       args.skip_open)
 
     if not rows:
         print(f"no LOBSTER data under {DATA_ROOT}", file=sys.stderr)
         return 1
-
-    rows.sort(key=lambda r: r["tick_ratio"])
 
     print("\nmeasured model parameters (event time, log price, shares)")
     hdr = (f"{'sym':<6} {'events':>8} {'mu':>9} {'sigma':>8} {'alpha':>11} "

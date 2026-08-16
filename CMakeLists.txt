@@ -76,6 +76,9 @@ target_link_libraries(wal_verify PRIVATE order_book ome_warnings)
 add_executable(zi_sim tools/zi_sim.cpp)
 target_link_libraries(zi_sim PRIVATE order_book ome_warnings)
 
+add_executable(zi_paper tools/zi_paper.cpp)
+target_link_libraries(zi_paper PRIVATE order_book ome_warnings)
+
 add_executable(loadgen bench/loadgen.cpp)
 target_link_libraries(loadgen PRIVATE order_book ome_warnings Threads::Threads)
 

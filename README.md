@@ -235,6 +235,30 @@ the paper is not refuted here; it is confirmed in the weak sense five stocks
 allow, and the tick constraint is what a naive replication would have
 misreported as a refutation.
 
+That much is a correlation on five points, and `dp/p_c` is large for exactly
+the two cheapest stocks — so plenty of other things could produce the same
+ordering. [`tools/zi_paper.cpp`](tools/zi_paper.cpp) separates them by
+simulating the paper's model on this project's matching engine at each stock's
+measured parameters and its **real tick size**, where nothing about a cheap
+stock is present except four flow parameters and `dp`:
+
+| | dp/p_c | simulated ratio | real ratio | sim/real |
+|---|---:|---:|---:|---:|
+| GOOG | 0.21 | 0.66 | 4.36 | 0.15 |
+| AMZN | 0.76 | 0.83 | 5.66 | 0.15 |
+| INTC | 17.30 | **32.23** | **39.75** | **0.81** |
+| MSFT | 22.03 | **40.87** | **50.35** | **0.81** |
+
+**The tick alone reproduces 81% of the observed inflation**, the same fraction
+for both constrained stocks, and the simulated inflation is perfectly
+rank-ordered by `dp/p_c` (ρ = 1.000, p = 0.017). The remaining 19% is real and
+is presumably what the model deletes — strategic quoting, hidden liquidity,
+heterogeneous sizes.
+
+It doubles as an independent exercise of the matching engine: a continuous
+double auction driven for millions of events against an analytically known
+answer, agreeing with it to within a constant wherever that answer applies.
+
 The earlier stylized-facts comparison in
 [`docs/ZI_COMPARISON.md`](docs/ZI_COMPARISON.md) tests properties this paper
 never claims, and says so at the top.
