@@ -20,6 +20,18 @@ namespace order_book {
 struct PriceLevel {
     // integer ticks; level identity is exact equality on this field.
     std::int64_t price_ticks{};
+    // Running sum of orders' quantities at this level.
+    //
+    // Maintained incrementally rather than recomputed because the level
+    // accessors below sit on the matching thread's hot path — the price-band
+    // risk check consults the top of book on every order, and market-data
+    // publication walks the top ten levels after every book change. Summing a
+    // deque on each call makes both O(orders at the level), which at a hundred
+    // thousand resting orders is not a constant factor.
+    //
+    // Every mutation site must keep this in step; OrderBook::levels_consistent()
+    // is the invariant, and the tests assert it after every operation.
+    std::uint64_t total_qty{};
     std::deque<Order> orders;
 };
 
@@ -52,6 +64,16 @@ public:
                                                            std::int64_t price_ticks,
                                                            uint32_t traded_size,
                                                            bool allow_missing_level = false);
+
+    // Best price only, no quantity — O(1) and does not touch the orders at all.
+    // This is what the price-band check needs, and using the full level
+    // accessor for it was walking the whole top level on every order.
+    [[nodiscard]] bool best_bid_ticks(std::int64_t& out) const noexcept;
+    [[nodiscard]] bool best_ask_ticks(std::int64_t& out) const noexcept;
+
+    // Test-only: verifies every level's cached total_qty equals the sum of its
+    // orders. Cheap to call, O(orders), and never used in production.
+    [[nodiscard]] bool levels_consistent() const;
 
     // aggregated sizes per price level, best levels first. prices are already ticks.
     [[nodiscard]] std::vector<std::pair<std::int64_t, std::uint64_t>> bid_levels_ticks(
