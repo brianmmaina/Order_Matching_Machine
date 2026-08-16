@@ -693,17 +693,24 @@ TEST(Broadcast, two_subscribers_see_the_same_book) {
     send_order(trader, 1, 1234500, 7, Side::Ask);
     ASSERT_TRUE(next_of_type(trader, MessageType::Ack, m));
 
-    Msg ma{}, mb{};
-    ASSERT_TRUE(next_of_type(a, MessageType::BookUpdate, ma));
-    ASSERT_TRUE(next_of_type(b, MessageType::BookUpdate, mb));
-    const auto ua = decode<BookUpdate>(ma.payload.data(), ma.payload.size());
-    const auto ub = decode<BookUpdate>(mb.payload.data(), mb.payload.size());
-    ASSERT_TRUE(ua.has_value());
-    ASSERT_TRUE(ub.has_value());
-    ASSERT_FALSE(ua->asks.empty());
-    ASSERT_FALSE(ub->asks.empty());
-    EXPECT_EQ(ua->asks[0].price_ticks, 1234500);
-    EXPECT_EQ(ub->asks[0].price_ticks, ua->asks[0].price_ticks) << "subscribers disagree";
+    // Read until the update that reflects the order, rather than assuming it is
+    // the very next one. Subscribing the SECOND client publishes another
+    // snapshot to BOTH, so the first client can have an intervening empty
+    // update queued — and conflation decides how many of those survive, which
+    // depends on when the network thread happened to drain. Asserting on "the
+    // next BookUpdate" made this test fail under ThreadSanitizer, where the
+    // timing differs, while passing everywhere else.
+    const auto await_ask = [](int fd, std::int64_t want) -> bool {
+        Msg m{};
+        for (int i = 0; i < 20; ++i) {
+            if (!next_of_type(fd, MessageType::BookUpdate, m)) return false;
+            const auto up = decode<BookUpdate>(m.payload.data(), m.payload.size());
+            if (up && !up->asks.empty() && up->asks[0].price_ticks == want) return true;
+        }
+        return false;
+    };
+    EXPECT_TRUE(await_ask(a, 1234500)) << "subscriber a never saw the resting ask";
+    EXPECT_TRUE(await_ask(b, 1234500)) << "subscriber b never saw the resting ask";
     ::close(a);
     ::close(b);
     ::close(trader);
