@@ -171,6 +171,97 @@ nondimensional tick size predicts the size of its error.
 
 ---
 
+---
+
+## Is the tick a mechanism, or just a correlate?
+
+Everything above is a correlation on five points, and it has an obvious
+alternative explanation. `dp/p_c` is large for exactly INTC and MSFT, which are
+also the two cheapest, highest-volume, most heavily quoted names in the sample.
+A dozen things that distinguish a $30 stock from a $500 stock would produce the
+same ordering.
+
+Simulation separates them, because it can hold everything else fixed.
+[`tools/zi_paper.cpp`](../tools/zi_paper.cpp) implements the paper's model —
+the austere one: single order size, uniform deposition, equal rates, constant
+cancellation — on this project's own matching engine. Run it at each stock's
+measured `(α, μ, δ, σ)` and its **real tick size**, and nothing about a cheap
+stock is present except four flow parameters and `dp`.
+
+```bash
+cmake --build build --target zi_paper
+python3 analysis/validate_scaling.py --events 1000000 --seeds 5
+```
+
+The prediction, stated before running it: small `dp/p_c` should give a
+simulated ratio near 1, and large `dp/p_c` should give a ratio near the
+*empirical* ratio for that stock. The second half is the risky one — a coarse
+grid inflating the spread is easy, matching the *size* of the real inflation is
+not.
+
+| | dp/p_c | sim ratio | real ratio | sim/real |
+|---|---:|---:|---:|---:|
+| GOOG | 0.21 | 0.66 ± 0.01 | 4.36 | 0.15 |
+| AAPL | 0.35 | 0.72 ± 0.01 | 3.70 | 0.19 |
+| AMZN | 0.76 | 0.83 ± 0.01 | 5.66 | 0.15 |
+| INTC | 17.30 | **32.23** ± 0.00 | **39.75** | **0.81** |
+| MSFT | 22.03 | **40.87** ± 0.00 | **50.35** | **0.81** |
+
+**The tick alone reproduces 81% of the observed inflation** for both
+tick-constrained stocks — the same fraction for each, which is not something
+the run was tuned to produce.
+
+The simulated inflation is **perfectly rank-ordered by `dp/p_c`** (ρ = 1.000,
+exact p = 0.017). Inside the simulation that is a much stronger statement than
+the same number was on real data: `dp/p_c` and the four flow parameters are the
+*only* things that vary, so there is no confounder left to appeal to.
+
+Two things this does **not** show:
+
+* **The remaining 19% is real.** The tick is the dominant term, not the whole
+  story. What is left is presumably the things the model deletes — strategic
+  quoting, hidden liquidity, heterogeneous order sizes.
+* **The small-tick ratio is 0.66–0.83, not 1.0.** The simulation runs about 25%
+  *below* the mean field prediction, consistently. `f(ε)` is itself an
+  approximation, so a systematic gap of this size is unremarkable, but it is a
+  gap and it is not being rounded to "agreement".
+
+The useful by-product: this is an independent exercise of the matching engine —
+a continuous double auction driven for millions of events with an answer known
+analytically — and it agrees with that answer to within a constant wherever the
+analytic result claims to apply.
+
+### The width scan is the negative control
+
+The paper's deposition intervals are semi-infinite and a simulation must
+truncate them. If the answer moves when the truncation moves, the boundary is
+setting the spread rather than the order flow, and the whole result is an
+artifact:
+
+```bash
+./build/zi_paper --alpha ... --dp ... --width-scan
+```
+
+GOOG returns 0.66, 0.68, 0.65, 0.69, 0.70 across a 16× range of widths; INTC
+returns 32.23 at every width.
+
+This was not a formality. The first implementation truncated to a **fixed price
+box** centred at zero, and the scan produced 32.23, 32.23, 32.23, **0.00**,
+32.23 — non-monotonic in the width, which is the signature of a bug rather than
+a boundary effect. The book could pin its best bid against the top of the box,
+at which point the sell interval `[b+1, box_top]` was empty and no sell order
+could ever arrive again: an absorbing one-sided state that silently reported a
+spread of zero. The same fixed box also made the buy and sell arrival rates
+depend on where the price sat inside it, quietly breaking the model's
+equal-rates assumption.
+
+Anchoring each interval to the opposing best quote — buys on `[a(t)−W, a(t)−1]`,
+sells on `[b(t)+1, b(t)+W]` — fixes both: constant equal widths, and prices free
+to wander. Without the scan, the fixed-box version would have produced a
+plausible-looking table.
+
+---
+
 ## Limits — read before quoting any number here
 
 * **5 stocks, not 11. One day, not 434.** The paper averages parameters over
