@@ -22,3 +22,10 @@ data/lobster/**/*.7z
 OME_*_PLAN.md
 *_PLAN.md
 notes/
+
+# python bytecode
+__pycache__/
+*.pyc
+
+# papers are not mine to redistribute
+*.pdf
