@@ -39,6 +39,7 @@
 #include "ome/egress.hpp"
 #include "ome/notifier.hpp"
 #include "ome/risk_config.hpp"
+#include "ome/snapshot.hpp"
 #include "ome/wal.hpp"
 #include "ome/waiter.hpp"
 #include "spsc_queue.h"
@@ -126,6 +127,64 @@ public:
     // stop(); calling it while the thread runs is the race this design exists
     // to prevent.
     [[nodiscard]] std::uint64_t digest() const { return engine_.book().digest(); }
+
+    // Everything needed to reconstruct this thread's state. Call between
+    // batches on the matching thread, or before start()/after stop().
+    [[nodiscard]] SnapshotData export_snapshot(std::uint64_t last_seq) const {
+        SnapshotData d{};
+        d.last_seq = last_seq;
+        d.last_trade_ticks = last_trade_ticks_;
+        d.next_exchange_id = next_exchange_id_;
+        for (const auto& o : engine_.book().all_orders()) {
+            SnapshotOrder so{};
+            so.exchange_id = o.id;
+            so.price_ticks = o.price_ticks;
+            so.quantity = o.quantity;
+            so.side = (o.side == Order::BID) ? 0 : 1;
+            so.timestamp = o.timestamp;
+            const auto owner = owner_of_.find(o.id);
+            so.session = (owner == owner_of_.end()) ? 0 : owner->second;
+            const auto cid = client_id_of_.find(o.id);
+            so.client_order_id = (cid == client_id_of_.end()) ? 0 : cid->second;
+            d.orders.push_back(so);
+        }
+        return d;
+    }
+
+    // Rebuilds from a snapshot. Before start(), like recover().
+    //
+    // Orders are re-added in the order they were exported — book order, which
+    // is time priority within each level — so addOrder reconstructs the same
+    // book. The ownership maps are rebuilt alongside, otherwise a cancel
+    // arriving after recovery would find nothing.
+    void restore(const SnapshotData& d) {
+        last_trade_ticks_ = d.last_trade_ticks;
+        next_exchange_id_ = d.next_exchange_id;
+        for (const auto& so : d.orders) {
+            Order o{};
+            o.id = so.exchange_id;
+            o.price_ticks = so.price_ticks;
+            o.quantity = so.quantity;
+            o.side = (so.side == 0) ? Order::BID : Order::ASK;
+            o.type = Order::LIMIT;
+            o.timestamp = so.timestamp;
+            engine_.book().addOrder(o);
+
+            owner_of_[so.exchange_id] = so.session;
+            client_id_of_[so.exchange_id] = so.client_order_id;
+            remaining_of_[so.exchange_id] = so.quantity;
+            side_of_[so.exchange_id] = o.side;
+            session_orders_[so.session].insert(so.exchange_id);
+            by_client_id_[key_of(so.session, so.client_order_id)] = so.exchange_id;
+        }
+        // Logical timestamps must not restart below what the restored orders
+        // already carry, or a later order could sort ahead of an earlier one.
+        for (const auto& so : d.orders) {
+            if (so.timestamp > logical_clock_) {
+                logical_clock_ = so.timestamp;
+            }
+        }
+    }
 
 private:
     void run() {
