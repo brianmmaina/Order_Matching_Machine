@@ -2,7 +2,7 @@
 
 Measured by `analysis/stylized_facts.py` directly from the message
 stream — no book reconstruction, so none of these numbers are affected
-by the replay accuracy gap. See `OME_RESEARCH_PLAN.md` (R0).
+by the replay accuracy gap.
 
 Sample: NASDAQ, 2012-06-21, one full session per symbol.
 
@@ -108,11 +108,11 @@ A sound measure needs the mid price before and after the trade, and the mid
 needs a reconstructed book. Impact therefore belongs to the book-dependent
 half of the battery and waits on reconstruction fidelity.
 
-## What this means for the research plan
+## What the data supports
 
-R0 was the de-risking step: can a single session show these effects at all?
+Can a single trading session show these effects at all?
 
-| Fact | Signal | Usable as a ZI comparison target? |
+| Fact | Signal | Usable as a comparison target? |
 |---|---|---|
 | Cancel-to-execution ratio | **Strong** — 91–96%, all five symbols | Yes |
 | Trade-sign autocorrelation | **Strong** — ACF(1) = 0.72–0.91, decays to ~0 by lag 100 | Yes, and it is the sharpest test |
@@ -152,8 +152,8 @@ volatility signal.
 
 So the honest statement is: **volatility clustering is measurable here in
 wide-spread names and not in tick-constrained ones, on one session.** That is
-usable as a ZI target for three symbols, and the cross-sectional pattern is
-worth reporting in its own right.
+usable as a comparison target for three symbols, and the cross-sectional
+pattern is worth reporting in its own right.
 
 ### Would more trading days help?
 
@@ -165,16 +165,15 @@ is where more data would genuinely buy something: many sessions would allow a
 daily-horizon measurement, which is where this effect is conventionally studied
 and where tick constraint stops dominating.
 
-That is a real but narrow gain. It does not block R1–R4, and the LOBSTER free
-sample is one session by design, so obtaining more means either paid academic
-access or parsing raw NASDAQ ITCH. Neither is justified by one marginal
-statistic when the primary comparison target is already this clean.
+That is a real but narrow gain. The LOBSTER free sample is one session by design, so obtaining more means
+either paid academic access or parsing raw NASDAQ ITCH. Neither is justified by
+one marginal statistic when the primary comparison target is already this
+clean.
 
-### Price impact was reclassified, and that is R0 earning its cost
+### Price impact is not measurable from trades alone
 
-The plan listed impact as message-derived and therefore available immediately.
-It is not. The trade-only proxy measures bid-ask bounce, and on the two
+Impact looks message-derived and therefore available immediately. It is not. The trade-only proxy measures bid-ask bounce, and on the two
 penny-spread symbols it confidently reports that buying pushes price *down*. A
 correct measure needs the mid price, and the mid needs a reconstructed book.
-Finding this now cost one sitting; finding it after building the simulator would
-have produced a plausible-looking wrong answer.
+Finding this before building a simulator matters: the trade-only version
+produces a plausible-looking wrong answer rather than an obvious failure.
