@@ -8,6 +8,7 @@
 #include <unordered_map>
 // hash table: average o(1) lookup by order id for cancel path; tradeoff: no stable iteration order.
 
+#include <string>
 #include <vector>
 // contiguous storage for price levels; pairs with std::lower_bound for sorted insertion.
 
@@ -74,6 +75,26 @@ public:
     // Test-only: verifies every level's cached total_qty equals the sum of its
     // orders. Cheap to call, O(orders), and never used in production.
     [[nodiscard]] bool levels_consistent() const;
+
+    // Canonical fingerprint of the book's visible state: for each level, on
+    // each side, best first — (price_ticks, total quantity, order count).
+    //
+    // THIS IS AN EXACT INTEGER HASH, and that is the whole reason session 0.2
+    // converted prices from double to int64. Two books either produce the same
+    // digest or they do not; there is no tolerance, no epsilon, and no question
+    // of what "equal enough" means. A digest over floating-point prices would
+    // turn "the recovered book is identical" — the central claim of this phase —
+    // into a float-equality comparison dressed up as a durability guarantee.
+    //
+    // What it deliberately does NOT include: order ids and timestamps. Those are
+    // assigned by the matching thread from counters that restart at the same
+    // place on replay, so including them would make the digest match for the
+    // wrong reason. It captures what a market participant can observe.
+    [[nodiscard]] std::uint64_t digest() const;
+
+    // Human-readable dump of the same state, for when two digests differ and
+    // the question is where. Ordering matches digest() exactly.
+    [[nodiscard]] std::string debug_dump() const;
 
     // aggregated sizes per price level, best levels first. prices are already ticks.
     [[nodiscard]] std::vector<std::pair<std::int64_t, std::uint64_t>> bid_levels_ticks(

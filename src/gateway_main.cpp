@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "ome/matching_thread.hpp"
 #include "ome/risk_config.hpp"
@@ -36,6 +37,7 @@ void usage() {
               << "  --risk F   risk limits from a key=value file (see config/risk.conf)\n"
               << "  --wal F    append commands to a write-ahead log at F\n"
               << "  --wal-no-fullsync  weaker durability, much lower tail latency\n"
+              << "  --recover  replay the log at startup before accepting clients\n"
               << "\n"
               << "Runs a network thread and a single matching thread joined by a\n"
               << "lock-free queue. The book is touched only by the matching thread.\n"
@@ -48,6 +50,8 @@ int main(int argc, char** argv) {
     ome::TcpServerConfig cfg{};
     std::string wal_path;
     ome::WalConfig wal_cfg{};
+    bool recover = false;
+    std::vector<ome::OrderCommand> pending_recovery;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -57,6 +61,10 @@ int main(int argc, char** argv) {
         }
         if (arg == "--wal" && i + 1 < argc) {
             wal_path = argv[++i];
+            continue;
+        }
+        if (arg == "--recover") {
+            recover = true;
             continue;
         }
         if (arg == "--wal-no-fullsync") {
@@ -106,11 +114,36 @@ int main(int argc, char** argv) {
         return 1;
     }
     ome::Wal wal;
+    std::uint64_t resume_seq = 0;
+    if (!wal_path.empty() && recover) {
+        const auto rd = ome::read_wal(wal_path);
+        if (!rd.error.empty()) {
+            // A missing log on first start is fine; anything else is not.
+            std::cout << "no log to recover from (" << rd.error << ")\n";
+        } else {
+            if (rd.sequence_gap) {
+                // A torn tail means an interrupted write. A GAP means a record
+                // that was written is missing, so the book we would rebuild is
+                // not the book that existed. Refuse rather than serve it.
+                std::cerr << "refusing to start: sequence gap after seq " << rd.gap_after
+                          << " in " << wal_path << "\n";
+                return 1;
+            }
+            pending_recovery = rd.commands;
+            resume_seq = rd.last_seq;
+            const std::size_t n = pending_recovery.size();
+            std::cout << "recovered " << n << " commands, last seq " << rd.last_seq;
+            if (rd.truncated_bytes > 0) {
+                std::cout << ", discarded " << rd.truncated_bytes << " bytes of torn tail";
+            }
+            std::cout << "\n";
+        }
+    }
     if (!wal_path.empty()) {
         const auto now = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
-        if (!wal.open(wal_path, now, 0, wal_cfg)) {
+        if (!wal.open(wal_path, now, resume_seq, wal_cfg)) {
             std::cerr << wal.error() << "\n";
             return 1;
         }
@@ -129,6 +162,12 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
+    if (!pending_recovery.empty()) {
+        // Before start(): recovery runs on this thread, so nothing races the
+        // book while it is being rebuilt.
+        matcher.recover(pending_recovery);
+        std::cout << "book digest after recovery: " << matcher.digest() << "\n";
+    }
     matcher.start();
 
     std::cout << "gateway listening on 127.0.0.1:" << server.bound_port() << "\n";
