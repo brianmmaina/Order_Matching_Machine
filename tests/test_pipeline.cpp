@@ -701,10 +701,10 @@ TEST(Broadcast, two_subscribers_see_the_same_book) {
     // next BookUpdate" made this test fail under ThreadSanitizer, where the
     // timing differs, while passing everywhere else.
     const auto await_ask = [](int fd, std::int64_t want) -> bool {
-        Msg m{};
+        Msg seen{};
         for (int i = 0; i < 20; ++i) {
-            if (!next_of_type(fd, MessageType::BookUpdate, m)) return false;
-            const auto up = decode<BookUpdate>(m.payload.data(), m.payload.size());
+            if (!next_of_type(fd, MessageType::BookUpdate, seen)) return false;
+            const auto up = decode<BookUpdate>(seen.payload.data(), seen.payload.size());
             if (up && !up->asks.empty() && up->asks[0].price_ticks == want) return true;
         }
         return false;
