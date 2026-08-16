@@ -616,6 +616,21 @@ TEST(Risk, heartbeats_are_exempt_from_the_rate_limit) {
 // --- market data broadcast, end to end (session 1.6) -----------------------
 
 namespace {
+
+// THE RULE FOR EVERY MARKET-DATA TEST IN THIS FILE:
+//
+//   never assert on "the next BookUpdate".
+//
+// Market data is conflated. How many updates a subscriber actually receives
+// depends on when the network thread happened to drain its queue relative to
+// the matching thread's pushes — which is scheduling, not behavior. N book
+// changes may arrive as anything from 1 to N messages, and both are correct.
+//
+// Asserting on a specific next message therefore tests the scheduler. It passes
+// most of the time, which is worse than failing: it went green on four of five
+// CI jobs and on main, and only ThreadSanitizer's different timing exposed it.
+//
+// Instead, read until the state you expect appears, with a bounded budget.
 void subscribe(int fd, std::uint8_t depth = 10) {
     Subscribe s{};
     s.depth = depth;
@@ -641,12 +656,17 @@ TEST(Broadcast, a_subscriber_receives_book_updates) {
     send_order(trader, 1, 1000000, 10, Side::Bid);
     ASSERT_TRUE(next_of_type(trader, MessageType::Ack, m));
 
-    ASSERT_TRUE(next_of_type(sub, MessageType::BookUpdate, m)) << "no update after a book change";
-    const auto up = decode<BookUpdate>(m.payload.data(), m.payload.size());
-    ASSERT_TRUE(up.has_value());
-    ASSERT_FALSE(up->bids.empty()) << "update did not show the resting bid";
-    EXPECT_EQ(up->bids[0].price_ticks, 1000000);
-    EXPECT_EQ(up->bids[0].quantity, 10u);
+    // read until the bid appears; see the rule at the top of this file
+    bool saw_bid = false;
+    for (int i = 0; i < 20 && !saw_bid; ++i) {
+        if (!next_of_type(sub, MessageType::BookUpdate, m)) break;
+        const auto up = decode<BookUpdate>(m.payload.data(), m.payload.size());
+        if (up && !up->bids.empty() && up->bids[0].price_ticks == 1000000 &&
+            up->bids[0].quantity == 10u) {
+            saw_bid = true;
+        }
+    }
+    EXPECT_TRUE(saw_bid) << "the resting bid never appeared in any book update";
     ::close(sub);
     ::close(trader);
 }
@@ -731,15 +751,26 @@ TEST(Broadcast, updates_carry_a_strictly_increasing_sequence) {
     Msg m{};
     ASSERT_TRUE(next_of_type(sub, MessageType::BookUpdate, m));
 
-    std::uint64_t prev = 0;
     for (std::uint64_t i = 1; i <= 5; ++i) {
         send_order(trader, i, 1000000 + static_cast<std::int64_t>(i) * 100, 1, Side::Bid);
         ASSERT_TRUE(next_of_type(trader, MessageType::Ack, m));
-        ASSERT_TRUE(next_of_type(sub, MessageType::BookUpdate, m));
+    }
+
+    // Collect whatever arrives. Five book changes may be delivered as anywhere
+    // from one message to five — conflation decides, and both are correct. What
+    // must hold regardless is that seq STRICTLY INCREASES and never repeats or
+    // goes backwards; it is the ordering key, and gaps in it are by design.
+    std::vector<std::uint64_t> seqs;
+    for (int i = 0; i < 20; ++i) {
+        if (!next_of_type(sub, MessageType::BookUpdate, m)) break;
         const auto up = decode<BookUpdate>(m.payload.data(), m.payload.size());
-        ASSERT_TRUE(up.has_value());
-        EXPECT_GT(up->seq, prev) << "sequence did not advance";
-        prev = up->seq;
+        if (up) seqs.push_back(up->seq);
+        if (!up->bids.empty() && up->bids[0].price_ticks == 1000500) break;  // final state
+    }
+    ASSERT_GE(seqs.size(), 2u) << "no sequence to check";
+    for (std::size_t i = 1; i < seqs.size(); ++i) {
+        EXPECT_GT(seqs[i], seqs[i - 1])
+            << "seq did not strictly increase: " << seqs[i - 1] << " then " << seqs[i];
     }
     ::close(sub);
     ::close(trader);
