@@ -112,7 +112,21 @@ server→client 10+.
 
 **`BookUpdate`** (variable) — `u64 seq`, `u8 bid_count`, `u8 ask_count`, then
 `bid_count` levels followed by `ask_count` levels, each `{i64 price_ticks,
-u64 quantity}`. Bids descending, asks ascending, each side ≤ 10.
+u64 quantity}`. Bids descending, asks ascending, each side ≤ 10 and ≤ the depth
+requested in `Subscribe`.
+
+**`seq` is strictly increasing but NOT contiguous.** Market data is conflated: a
+subscriber that falls behind receives the newest snapshot and the intermediate
+ones are skipped, so the sequence jumps. This is normal operation, not loss — a
+client that treats a gap as a missed message will flag healthy behavior as an
+error. Use `seq` to order updates and to detect *reordering*, never to detect
+loss.
+
+The reason market data may be skipped while order flow may not is that a
+`BookUpdate` is a complete snapshot: a newer one contains everything an older
+one did. An `Ack` or `Fill` is a distinct fact the client cannot reconstruct,
+so those are never dropped — a client falling behind on order flow is
+disconnected instead.
 
 **`Heartbeat`** (8 bytes) — `timestamp_ns`.
 
@@ -209,6 +223,7 @@ server.
 | 8     | `NOT_SUBSCRIBED`       | market-data request without a subscription     |
 | 9     | `DUPLICATE_ORDER_ID`   | `client_order_id` reused within a session      |
 | 10    | `UNKNOWN_MESSAGE_TYPE` | well-formed frame, unrecognized type           |
+| 11    | `NOT_IMPLEMENTED`      | recognized message the server cannot serve yet  |
 
 ---
 
