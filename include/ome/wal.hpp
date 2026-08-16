@@ -176,6 +176,28 @@ inline void encode_command(std::vector<std::uint8_t>& out, const OrderCommand& c
            t == CommandType::Modify || t == CommandType::CancelAllForSession;
 }
 
+// --- reader result (declared before the writer, which uses it) -------------
+
+struct WalReadResult {
+    std::vector<OrderCommand> commands;
+    // Sequence number of commands[0]. NOT always 1: truncation drops records
+    // from the front while preserving the numbering, so a log that has been
+    // compacted behind a snapshot starts partway through. Callers that need to
+    // know which records a snapshot already covers must use this rather than
+    // counting from one.
+    std::uint64_t first_seq{0};
+    std::uint64_t last_seq{0};
+    // Bytes at the end that did not form an intact record. Non-zero after a
+    // crash is NORMAL, not an error: the process died mid-write.
+    std::size_t truncated_bytes{0};
+    bool sequence_gap{false};
+    std::uint64_t gap_after{0};
+    std::string error;
+};
+
+// Defined below; the writer needs it for truncate_before().
+[[nodiscard]] WalReadResult read_wal(const std::string& path);
+
 // --- writer ----------------------------------------------------------------
 
 class Wal {
@@ -246,6 +268,100 @@ public:
     // the next command arrived, which could be a long time.
     void poll_sync(std::uint64_t now_ns) { maybe_sync(now_ns); }
 
+    // Drops records at or below `keep_after`, which a snapshot has made
+    // redundant. Without this the log grows for the lifetime of the exchange
+    // and recovery has to read all of it, even though a snapshot means most of
+    // it will never be applied.
+    //
+    // Safe because the matching thread owns both the WAL and the snapshot: this
+    // is called between batches, so nothing is appending while the file is
+    // rewritten. Rewrite-and-rename rather than in-place truncation, for the
+    // same reason snapshots use it — a crash mid-rewrite must leave the old
+    // complete file, not half of a new one.
+    [[nodiscard]] bool truncate_before(std::uint64_t keep_after, std::string& error) {
+        if (fd_ < 0) {
+            error = "wal not open";
+            return false;
+        }
+        sync();
+        ::close(fd_);
+        fd_ = -1;
+
+        const auto rd = read_wal(path_);
+        if (!rd.error.empty()) {
+            error = rd.error;
+            return false;
+        }
+
+        std::vector<std::uint8_t> out;
+        // Start from the log's OWN first sequence, not 1. This log may already
+        // have been truncated once, in which case it begins partway through.
+        //
+        // Counting from 1 here worked on the first truncation and silently
+        // renumbered every record on the second, which produced a genuine
+        // sequence gap and a gateway that refused to start. Found by the kill
+        // harness at iteration 17, not by any unit test.
+        std::uint64_t seq = rd.first_seq;
+        std::uint64_t kept = 0;
+        for (const auto& c : rd.commands) {
+            if (seq <= keep_after) {
+                ++seq;
+                continue;
+            }
+            std::vector<std::uint8_t> payload;
+            encode_command(payload, c);
+            protocol::detail::put_u32(out, static_cast<std::uint32_t>(payload.size()));
+            protocol::detail::put_u32(out, crc32(payload.data(), payload.size()));
+            // Sequence numbers are PRESERVED, not renumbered. Recovery compares
+            // them against the snapshot's last_seq, so renumbering would make a
+            // kept record look like one the snapshot already covers.
+            protocol::detail::put_u64(out, seq);
+            out.insert(out.end(), payload.begin(), payload.end());
+            ++kept;
+            ++seq;
+        }
+
+        const std::string tmp = path_ + ".tmp";
+        const int t = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (t < 0) {
+            error = std::string("truncate: cannot create temp: ") + std::strerror(errno);
+            return false;
+        }
+        std::size_t off = 0;
+        while (off < out.size()) {
+            const ssize_t n = ::write(t, out.data() + off, out.size() - off);
+            if (n > 0) {
+                off += static_cast<std::size_t>(n);
+            } else if (!(n < 0 && errno == EINTR)) {
+                error = std::string("truncate: write failed: ") + std::strerror(errno);
+                ::close(t);
+                ::unlink(tmp.c_str());
+                return false;
+            }
+        }
+#if defined(__APPLE__)
+        static_cast<void>(::fcntl(t, F_FULLFSYNC));
+#else
+        static_cast<void>(::fsync(t));
+#endif
+        ::close(t);
+        if (::rename(tmp.c_str(), path_.c_str()) != 0) {
+            error = std::string("truncate: rename failed: ") + std::strerror(errno);
+            ::unlink(tmp.c_str());
+            return false;
+        }
+
+        fd_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd_ < 0) {
+            error = std::string("truncate: cannot reopen: ") + std::strerror(errno);
+            return false;
+        }
+        truncated_ += rd.commands.size() - kept;
+        return true;
+    }
+
+    [[nodiscard]] std::uint64_t truncated_records() const noexcept { return truncated_; }
+
     // Forces the group commit early. Called on clean shutdown so a graceful
     // stop has no loss window at all.
     void sync() {
@@ -301,22 +417,12 @@ private:
     std::uint64_t since_sync_{0};
     std::uint64_t last_sync_ns_{0};
     std::uint64_t syncs_{0};
+    std::uint64_t truncated_{0};
     std::vector<std::uint8_t> payload_;
     std::vector<std::uint8_t> record_;
 };
 
 // --- reader ----------------------------------------------------------------
-
-struct WalReadResult {
-    std::vector<OrderCommand> commands;
-    std::uint64_t last_seq{0};
-    // Bytes at the end that did not form an intact record. Non-zero after a
-    // crash is NORMAL, not an error: the process died mid-write.
-    std::size_t truncated_bytes{0};
-    bool sequence_gap{false};
-    std::uint64_t gap_after{0};
-    std::string error;
-};
 
 // Reads a log, stopping at the first record that is not intact.
 //
@@ -325,7 +431,7 @@ struct WalReadResult {
 // missing, which implies a lost or truncated file rather than an interrupted
 // write. That is reported, and startup should refuse rather than silently
 // rebuild a book with a hole in its history.
-[[nodiscard]] inline WalReadResult read_wal(const std::string& path) {
+inline WalReadResult read_wal(const std::string& path) {
     WalReadResult r{};
     const int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
@@ -374,6 +480,9 @@ struct WalReadResult {
             r.sequence_gap = true;
             r.gap_after = r.last_seq;
             break;
+        }
+        if (r.commands.empty()) {
+            r.first_seq = seq;
         }
         r.commands.push_back(c);
         r.last_seq = seq;

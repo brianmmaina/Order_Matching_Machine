@@ -72,6 +72,20 @@ kill -9 $(pgrep -f 'build/gateway')
 # book digest after recovery: ...
 ```
 
+With periodic snapshots, recovery reads state rather than history:
+
+```bash
+./build/gateway --wal /tmp/ome.wal --snapshot /tmp/ome.snap \
+                --snapshot-every 100000 --port 9001
+# ... after a kill:
+./build/gateway --wal /tmp/ome.wal --snapshot /tmp/ome.snap --recover --port 9001
+# restored 8020 orders from snapshot at seq 8020
+# recovered 1580 commands, last seq 9600
+```
+
+The WAL is compacted behind each snapshot, so it holds the tail rather than the
+whole history — 1,580 records instead of 9,600 above.
+
 Needs network once on first configure (GoogleTest via FetchContent). Build type
 defaults to Release. Builds with `-Wall -Wextra -Werror`.
 
@@ -91,7 +105,7 @@ repeated runs.
 | WAL cost (`fsync`) | +11 µs p50, +52 µs p99 |
 | WAL cost (`F_FULLFSYNC`) | 25× at the tail — see below |
 | Snapshot pause | 28 ms at 100,000 resting orders |
-| Crash recovery | **50/50** `kill -9` iterations, independent verifier |
+| Crash recovery | **50/50** WAL replay, **25/25** snapshot+tail, independent verifier |
 | LOBSTER replay | ~270K messages parsed, applied and checked in ~0.5 s |
 
 **Latency falls as load rises** — 185 µs at 100 orders/sec versus 45 µs at
@@ -111,7 +125,9 @@ quietly pick the weaker guarantee to look faster.
 ## Crash safety
 
 `tools/kill_test.sh` runs the gateway under load, `kill -9`s it at a random
-moment, restarts with recovery, and checks the rebuilt book. **50/50 passing.**
+moment, restarts with recovery, and checks the rebuilt book. **50/50 passing**
+on WAL replay, and **25/25** on the snapshot+tail path
+(`SNAPSHOT_EVERY=1500 tools/kill_test.sh 25`).
 
 The check that matters is not that recovery succeeds — it is what it is checked
 *against*. `tools/wal_verify` rebuilds the book from the same log using a
@@ -127,8 +143,16 @@ now quotes crossing prices with varying sizes so orders partially fill and leave
 real depth. With that fixed the broken verifier is caught immediately.
 
 ```bash
-tools/kill_test.sh 50
+tools/kill_test.sh 50                          # WAL replay
+SNAPSHOT_EVERY=1500 tools/kill_test.sh 25      # snapshot + tail
 ```
+
+The snapshot path found a bug the unit tests could not: `truncate_before()`
+derived sequence numbers by counting from 1, which is right for a log that still
+starts at 1 and wrong for one already truncated. The second truncation
+renumbered every surviving record, producing a genuine sequence gap and a
+gateway that correctly refused to start. It takes *two* truncations to see it,
+so no single-truncation test would have.
 
 **Scope, stated honestly.** `kill -9` destroys the process without letting it
 flush, but it does not destroy the page cache, so everything already handed to
@@ -229,7 +253,7 @@ book at all.
 **Snapshots pause the matching thread** — 28 ms at 100K resting orders. The fix
 is measured and known (the copy is 2.2 ms while the write is 26 ms, so
 serializing a copy on a background thread would remove most of it) and not yet
-implemented.
+implemented. Snapshots are off unless `--snapshot` is given.
 
 **Cancel-on-disconnect is O(orders held).** A session disconnecting with a very
 large book blocks the matching thread for the sweep.

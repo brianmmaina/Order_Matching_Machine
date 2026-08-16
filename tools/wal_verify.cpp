@@ -397,13 +397,17 @@ int main(int argc, char** argv) {
         return 3;
     }
 
-    std::uint64_t seq = 0;
+    // Start from the log's OWN first sequence number, not from 1: a log
+    // compacted behind a snapshot preserves its numbering and begins partway
+    // through.
+    std::uint64_t seq = rd.first_seq;
     std::size_t applied = 0;
     for (const auto& c : rd.commands) {
+        if (seq > from_seq) {
+            apply(book, c, risk, next_id);
+            ++applied;
+        }
         ++seq;
-        if (seq <= from_seq) continue;  // already covered by the snapshot
-        apply(book, c, risk, next_id);
-        ++applied;
     }
 
     // Invariants the digest does not check. A digest only says two books are

@@ -361,3 +361,134 @@ TEST(Wal, reopening_continues_the_sequence) {
     EXPECT_EQ(r.last_seq, 3u);
     std::remove(path.c_str());
 }
+
+// --- truncation ------------------------------------------------------------
+
+TEST(Wal, truncation_drops_covered_records_and_keeps_the_rest) {
+    const auto path = temp_path();
+    {
+        Wal w;
+        ASSERT_TRUE(w.open(path, 0));
+        for (std::uint64_t i = 1; i <= 20; ++i) {
+            ASSERT_TRUE(w.append(new_order(1, i, 1000000, 1), 0));
+        }
+        std::string err;
+        ASSERT_TRUE(w.truncate_before(12, err)) << err;
+        EXPECT_EQ(w.truncated_records(), 12u);
+        // appends continue from where the sequence left off
+        ASSERT_TRUE(w.append(new_order(1, 21, 1000000, 1), 0));
+    }
+
+    const auto r = read_wal(path);
+    ASSERT_TRUE(r.error.empty()) << r.error;
+    EXPECT_FALSE(r.sequence_gap) << "truncation created a gap";
+    EXPECT_EQ(r.commands.size(), 9u) << "kept the wrong number of records";
+    EXPECT_EQ(r.last_seq, 21u);
+    std::remove(path.c_str());
+}
+
+TEST(Wal, truncation_preserves_sequence_numbers) {
+    // REGRESSION. Truncation keeps the original numbering rather than
+    // renumbering from 1, because recovery compares those numbers against a
+    // snapshot's last_seq to decide what it has already covered.
+    //
+    // Both the gateway and the independent verifier used to derive the sequence
+    // by counting records from 1. After a truncation the first surviving record
+    // is not number 1, so every remaining command looked like one the snapshot
+    // already contained and the entire tail was skipped — silently, producing a
+    // stale book with no error anywhere.
+    const auto path = temp_path();
+    {
+        Wal w;
+        ASSERT_TRUE(w.open(path, 0));
+        for (std::uint64_t i = 1; i <= 30; ++i) {
+            ASSERT_TRUE(w.append(new_order(1, i, 1000000, 1), 0));
+        }
+        std::string err;
+        ASSERT_TRUE(w.truncate_before(25, err)) << err;
+    }
+
+    const auto r = read_wal(path);
+    ASSERT_EQ(r.commands.size(), 5u);
+    EXPECT_EQ(r.first_seq, 26u) << "first_seq must be the surviving record's own number";
+    EXPECT_EQ(r.last_seq, 30u);
+    // and the payloads are the ones we expect, not renumbered stand-ins
+    EXPECT_EQ(r.commands.front().client_order_id, 26u);
+    EXPECT_EQ(r.commands.back().client_order_id, 30u);
+    std::remove(path.c_str());
+}
+
+TEST(Wal, first_seq_is_one_for_an_untruncated_log) {
+    const auto path = temp_path();
+    {
+        Wal w;
+        ASSERT_TRUE(w.open(path, 0));
+        for (std::uint64_t i = 1; i <= 4; ++i) {
+            ASSERT_TRUE(w.append(new_order(1, i, 1000000, 1), 0));
+        }
+    }
+    const auto r = read_wal(path);
+    EXPECT_EQ(r.first_seq, 1u);
+    EXPECT_EQ(r.last_seq, 4u);
+    std::remove(path.c_str());
+}
+
+TEST(Wal, truncating_everything_leaves_an_empty_but_usable_log) {
+    const auto path = temp_path();
+    Wal w;
+    ASSERT_TRUE(w.open(path, 0));
+    for (std::uint64_t i = 1; i <= 5; ++i) {
+        ASSERT_TRUE(w.append(new_order(1, i, 1000000, 1), 0));
+    }
+    std::string err;
+    ASSERT_TRUE(w.truncate_before(5, err)) << err;
+    ASSERT_TRUE(w.append(new_order(1, 6, 1000000, 1), 0));
+
+    const auto r = read_wal(path);
+    ASSERT_EQ(r.commands.size(), 1u);
+    EXPECT_EQ(r.first_seq, 6u);
+    std::remove(path.c_str());
+}
+
+TEST(Wal, repeated_truncation_does_not_renumber_records) {
+    // REGRESSION, found by the kill harness rather than by a unit test.
+    //
+    // truncate_before() derived the sequence by counting from 1. That is right
+    // for a log that still starts at 1, and wrong for one already truncated:
+    // the second truncation renumbered every surviving record, producing a real
+    // sequence gap and a gateway that refused to start.
+    //
+    // A single truncation cannot catch this. It takes two.
+    const auto path = temp_path();
+    Wal w;
+    ASSERT_TRUE(w.open(path, 0));
+    for (std::uint64_t i = 1; i <= 40; ++i) {
+        ASSERT_TRUE(w.append(new_order(1, i, 1000000, 1), 0));
+    }
+
+    std::string err;
+    ASSERT_TRUE(w.truncate_before(10, err)) << err;
+    {
+        const auto r = read_wal(path);
+        ASSERT_FALSE(r.sequence_gap) << "gap after the first truncation";
+        EXPECT_EQ(r.first_seq, 11u);
+        EXPECT_EQ(r.last_seq, 40u);
+    }
+
+    ASSERT_TRUE(w.truncate_before(25, err)) << err;
+    {
+        const auto r = read_wal(path);
+        ASSERT_FALSE(r.sequence_gap) << "gap after the SECOND truncation";
+        EXPECT_EQ(r.first_seq, 26u) << "records were renumbered";
+        EXPECT_EQ(r.last_seq, 40u);
+        EXPECT_EQ(r.commands.size(), 15u);
+        EXPECT_EQ(r.commands.front().client_order_id, 26u);
+    }
+
+    // and appends still continue from the right place
+    ASSERT_TRUE(w.append(new_order(1, 41, 1000000, 1), 0));
+    const auto r = read_wal(path);
+    EXPECT_FALSE(r.sequence_gap);
+    EXPECT_EQ(r.last_seq, 41u);
+    std::remove(path.c_str());
+}
