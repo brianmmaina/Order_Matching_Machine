@@ -259,7 +259,45 @@ Worth being precise, because "durable" is doing a lot of work in most writeups:
 - With `--wal-no-fullsync` on macOS, a power cut can additionally lose whatever
   the drive was holding in its own cache, which the OS considers written.
 
-_Recovery time with and without snapshots: Sessions 2.2 and 2.3._
+### Snapshot pause and recovery time
+
+Measured 2026-08-16, median of 5, same machine and build. Orders spread over 200
+price levels, none crossing. The snapshot is written by the matching thread,
+which stops matching for the duration — the pause-the-world approach, chosen
+deliberately to be measured before anything cleverer is attempted.
+
+| Resting orders | Copy | Write + fsync | **Total pause** | Restore |
+|---|---|---|---|---|
+| 1,000 | 0.06 ms | 5.35 ms | **5.4 ms** | 1.0 ms |
+| 10,000 | 0.22 ms | 7.22 ms | **7.5 ms** | 5.3 ms |
+| 100,000 | 2.22 ms | 26.0 ms | **28.3 ms** | 38.6 ms |
+| 500,000 | 11.8 ms | 112 ms | **124 ms** | 322 ms |
+
+**The copy is not the problem; the write is.** Walking the book and building the
+record vector costs 2.2 ms at a hundred thousand orders, while writing and
+flushing costs 26 ms — twelve times more. Note also the 5.4 ms floor at a
+thousand orders, which is almost entirely `F_FULLFSYNC`: at small book sizes the
+pause is a fixed cost that has nothing to do with how much state there is.
+
+That decomposition answers the design question the plan left open. Copying the
+book on the matching thread and serializing the copy on a background thread
+would remove roughly 92% of the pause at 100K orders, and it is worth doing —
+but the measurement had to come first, because the intuition that "serializing a
+big book is slow" turns out to be wrong. Serializing it is fast. Making it
+durable is slow.
+
+**Verdict at realistic sizes:** pause-the-world is fine to ~10K resting orders
+(7.5 ms), questionable at 100K (28 ms), and unacceptable at 500K (124 ms). The
+switch point is around 50K.
+
+### Recovery time: full replay versus snapshot plus tail
+
+Restoring 100,000 orders from a snapshot takes 38.6 ms. Replaying the same state
+from the log means re-executing every command that built it — including all the
+matching, cancels and modifies that have since been superseded — so the ratio
+grows with the age of the log rather than with the size of the book. A snapshot
+bounds recovery to *state size*; a log bounds it to *history size*, and history
+only ever grows.
 
 ---
 
