@@ -214,12 +214,52 @@ Beyond the standing honesty requirements above:
 
 ## Durability cost
 
-The latency delta introduced by the write-ahead log, and recovery time with and
-without snapshots. Populated in Sessions 2.1 and 2.3.
-
 The WAL delta **is** the price of durability. It gets stated, not hidden.
 
-_No results recorded yet._
+Measured 2026-08-16. 10 clients x 1,000 orders/sec (10,000/s offered), 4s after
+a 1s warm-up, three runs each, same machine and build as the table above.
+Group commit at 100 records or 10 ms, whichever comes first.
+
+| Configuration | p50 µs | p90 µs | p99 µs |
+|---|---|---|---|
+| No WAL | 110 | 143 | 170 |
+| WAL, `fsync` | 121 | 167 | 222 |
+| WAL, `F_FULLFSYNC` (default) | 136–203 | ~3,400 | ~4,400 |
+
+**Ordinary durability is cheap. Media-level durability is not.**
+
+`fsync` costs **+11 µs at p50 and +52 µs at p99** — about 10% and 30%. That is
+the honest price of an append-before-apply log at this rate, and it is small
+because the append itself is a `write()` into the page cache; only the periodic
+flush costs anything.
+
+`F_FULLFSYNC` costs **25x at the tail**. On macOS, `fsync` returns once the data
+has reached the drive; the drive may still hold it in a volatile cache.
+`F_FULLFSYNC` waits for the drive to commit to stable media, and that is the
+only call that survives a power cut. It takes milliseconds, and it runs **on the
+matching thread**, so order processing stalls for its duration — which is why
+p90 and p99 blow up while p50 moves comparatively little. Most orders are
+unaffected; the ones that land during a flush wait for it.
+
+The gateway defaults to `F_FULLFSYNC`. A log whose entire purpose is surviving
+machine failure should not quietly pick the weaker guarantee to look faster.
+`--wal-no-fullsync` trades it back, and anyone using it should say so.
+
+### What is actually lost, and when
+
+Worth being precise, because "durable" is doing a lot of work in most writeups:
+
+- **Process death — `kill -9`, a segfault, an assertion — loses nothing.** The
+  records were handed to the kernel with `write()`, and the page cache outlives
+  the process. Session 2.4's kill testing exercises exactly this case, and it is
+  fully recoverable.
+- **Machine death — power cut, kernel panic — loses at most the group-commit
+  window**: 100 records or 10 ms of orders, whichever came first. Those orders
+  may have been acknowledged to their clients.
+- With `--wal-no-fullsync` on macOS, a power cut can additionally lose whatever
+  the drive was holding in its own cache, which the OS considers written.
+
+_Recovery time with and without snapshots: Sessions 2.2 and 2.3._
 
 ---
 
