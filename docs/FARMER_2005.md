@@ -5,6 +5,7 @@
 > [arXiv:cond-mat/0309233](https://arxiv.org/abs/cond-mat/0309233)
 
 Run it: `python3 analysis/farmer2005.py`
+Charts: `python3 analysis/plot_farmer2005.py` → [`farmer2005.html`](farmer2005.html)
 
 ---
 
@@ -133,6 +134,47 @@ n = 5.
 
 The spread ordering is **not significant** (p = 0.083): GOOG and AAPL swap.
 Stated as a null result, because it is one.
+
+### Intraday error bars
+
+The paper averages parameters over 434 days per stock, which is what gives its
+real side an error bar. LOBSTER's free sample is one day, so the real side above
+is a single observation per stock.
+
+`--blocks 13` cuts the session into 30-minute blocks and re-measures everything
+inside each, in one pass:
+
+| | dp/p_c | ratio (full day) | block mean ± sd | block range |
+|---|---:|---:|---:|---:|
+| GOOG | 0.21 | 4.36 | 4.39 ± 0.88 | 2.70 – 6.00 |
+| AAPL | 0.35 | 3.70 | 3.60 ± 0.44 | 2.84 – 4.60 |
+| AMZN | 0.76 | 5.66 | 6.13 ± 1.77 | 3.45 – 9.49 |
+| INTC | 17.30 | 39.75 | 40.43 ± 5.54 | 28.48 – 49.89 |
+| MSFT | 22.03 | 50.35 | 36.52 ± 10.96 | 25.32 – 55.25 |
+
+**The two regimes do not overlap in any of the 65 block measurements.** The
+small-tick group tops out at 9.49 and the tick-constrained group bottoms out at
+25.32. That separation is a stronger statement than the full-day ratios alone,
+because it survives being re-measured 13 times.
+
+The ordering is also stable: the rank correlation between spread error and
+`dp/p_c` is **positive in 13 of 13 blocks**, ρ = 0.9 in twelve of them and 1.0 in
+one. The persistent ρ = 0.9 rather than 1.0 is the same GOOG/AAPL swap seen over
+the full day, so that swap is a real feature of this sample rather than noise.
+
+**What blocks do and do not buy.** They measure *sampling* variability — is this
+stock's α the same in the second half hour as the ninth? They do **not** measure
+day-to-day variation: overnight gaps, news and regime shifts are invisible inside
+one session, so **these error bars are a lower bound on the true ones**. And
+blocks from a single day are correlated, so "13 of 13" is a consistency check,
+not thirteen independent replications. It answers *is the ordering an artifact of
+one measurement window?* — not *how many sigma is the effect?*
+
+One estimate does shift: MSFT's block mean (36.52) sits well below its full-day
+ratio (50.35). Per-block δ is more heavily censored than the full-day δ, since an
+order outliving its block is dropped rather than credited to a clock it never ran
+on. **The blocks are for variability; the full-session row remains the headline
+estimate.**
 
 ### Inside the stated domain
 

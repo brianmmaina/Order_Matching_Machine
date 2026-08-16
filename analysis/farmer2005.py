@@ -101,11 +101,48 @@ def find_pair(symbol):
     return (msg[0] if msg else None), (book[0] if book else None)
 
 
-def scan(symbol, msg_path, book_path, skip_open_s=0.0):
+SESSION_START = 34200.0   # 09:30:00, in seconds past midnight
+SESSION_END = 57600.0     # 16:00:00
+
+
+def _new_block():
+    return {
+        "mo_shares": 0, "lo_sizes": [], "n_events": 0,
+        "zeta_all": [], "lifetimes_by_zeta": [], "placed": [],
+        "spreads": [], "mids": [], "mid_sum": 0.0, "mid_n": 0,
+        "last_mid": None,
+    }
+
+
+def scan(symbol, msg_path, book_path, skip_open_s=0.0, n_blocks=1):
     """One pass over the message and orderbook files.
 
     Collects everything both halves of the test need: the raw material for the
     four model parameters, the realised spread, and the midpoint path.
+
+    With n_blocks > 1 the session is cut into equal-duration intraday blocks and
+    every quantity is accumulated per block, in ONE pass. Returns a single dict
+    when n_blocks == 1, a list of dicts otherwise.
+
+    WHY BLOCKS EXIST
+
+    The paper measures each parameter per day and averages over 434 days, which
+    is what gives its real side an error bar. LOBSTER's free sample is a single
+    day, so the real side here has exactly one observation per stock and no way
+    to say whether a measurement is stable or a fluke.
+
+    Intraday blocks are a partial substitute and it is important to be clear
+    about what they do and do not buy. They measure SAMPLING variability -- is
+    this stock's alpha the same in the second half hour as the ninth? They do
+    NOT measure day-to-day variability, so they will UNDERSTATE the true error:
+    overnight gaps, news, and regime changes are all invisible inside one
+    session. An error bar from blocks is a lower bound on the real one.
+
+    What they do buy, which is worth more than the error bar: the cross-sectional
+    ordering can be re-tested independently in each block. One ordering of five
+    stocks is one draw. The same ordering holding in block after block is a
+    different and much better-supported claim -- with the caveat that blocks
+    from one day are not independent of each other.
     """
     # --- effective market / effective limit ------------------------------
     #
@@ -119,25 +156,15 @@ def scan(symbol, msg_path, book_path, skip_open_s=0.0):
     # against one resting order, so type 4 shares ARE the transacted part. A
     # type 1 message is an order joining the book, so type 1 shares ARE the
     # resting part. A fully marketable order never produces a type 1 at all.
-    mo_shares = 0            # shares of effective market orders
-    lo_sizes = []            # sizes of effective limit orders -> sigma
-    n_events = 0             # event-time clock
+    blocks = [_new_block() for _ in range(max(1, n_blocks))]
+    t0 = SESSION_START + skip_open_s
+    span = max(1e-9, (SESSION_END - t0) / len(blocks))
 
-    zeta_all = []            # relative price of every effective limit order
-    live = {}                # order_id -> (zeta, event_index) for resting orders
-    lifetimes_by_zeta = []   # (zeta, lifetime in events) for fully cancelled orders
-    placed = []              # (zeta, shares) for the alpha numerator
-
-    spreads = []             # log a - log b after each event
-    mids = []                # log midpoint, one entry per midpoint CHANGE
-    mid_sum = 0.0            # for the mean price level -> tick size in log terms
-    mid_n = 0
-
+    live = {}                # order_id -> (zeta, event_index, block) for resting orders
     last_mo_key = None       # (timestamp, direction) for grouping a sweep
 
     with open(msg_path, newline="") as mf, open(book_path, newline="") as bf:
         prev_mid = None
-        last_mid = None
         for row, brow in zip(csv.reader(mf), csv.reader(bf)):
             if len(row) < 6:
                 continue
@@ -150,8 +177,10 @@ def scan(symbol, msg_path, book_path, skip_open_s=0.0):
                 direction = int(row[5])
             except ValueError:
                 continue
-            if t < 34200.0 + skip_open_s:
+            if t < t0:
                 continue
+            bi = min(len(blocks) - 1, max(0, int((t - t0) / span)))
+            B = blocks[bi]
 
             # ---- event-time clock -------------------------------------
             #
@@ -168,11 +197,11 @@ def scan(symbol, msg_path, book_path, skip_open_s=0.0):
             if mtype == EXEC_VISIBLE:
                 key = (t, direction)
                 if key != last_mo_key:
-                    n_events += 1
+                    B["n_events"] += 1
                     last_mo_key = key
-                mo_shares += size
+                B["mo_shares"] += size
             elif mtype in (NEW_LIMIT, PARTIAL_CANCEL, FULL_DELETE):
-                n_events += 1
+                B["n_events"] += 1
                 last_mo_key = None
             else:
                 # Hidden executions and anything else: not in the model.
@@ -190,13 +219,13 @@ def scan(symbol, msg_path, book_path, skip_open_s=0.0):
             # convention, zeta > 0 means the order rests away from the mid and
             # zeta < 0 means it crossed.
             if mtype == NEW_LIMIT:
-                lo_sizes.append(size)
+                B["lo_sizes"].append(size)
                 if prev_mid is not None and price > 0:
                     p = math.log(price)
                     z = (prev_mid - p) if direction == 1 else (p - prev_mid)
-                    zeta_all.append(z)
-                    placed.append((z, size))
-                    live[oid] = (z, n_events)
+                    B["zeta_all"].append(z)
+                    B["placed"].append((z, size))
+                    live[oid] = (z, B["n_events"], bi)
             elif mtype == FULL_DELETE:
                 # A3 measures delta from cancelled orders only, and lifetime
                 # "in terms of number of events happening between the
@@ -205,7 +234,13 @@ def scan(symbol, msg_path, book_path, skip_open_s=0.0):
                 # full delete ends a lifetime.
                 rec = live.pop(oid, None)
                 if rec is not None:
-                    lifetimes_by_zeta.append((rec[0], n_events - rec[1]))
+                    # The lifetime belongs to the block the order was PLACED in,
+                    # and is measured on that block's event clock. An order that
+                    # outlives its block is dropped rather than being credited
+                    # to a clock it never ran on -- see the censoring note in
+                    # the limits section.
+                    if rec[2] == bi:
+                        B["lifetimes_by_zeta"].append((rec[0], B["n_events"] - rec[1]))
 
             # ---- realised spread and midpoint path --------------------
             try:
@@ -216,30 +251,34 @@ def scan(symbol, msg_path, book_path, skip_open_s=0.0):
             if ask1 > 0 and bid1 > 0 and ask1 > bid1:
                 # "Spread is measured as the daily average of log b(t) -
                 # log a(t)", measured after each event with equal weight.
-                spreads.append(math.log(ask1) - math.log(bid1))
-                mid_sum += (ask1 + bid1) / 2.0
-                mid_n += 1
+                B["spreads"].append(math.log(ask1) - math.log(bid1))
+                B["mid_sum"] += (ask1 + bid1) / 2.0
+                B["mid_n"] += 1
                 m = math.log((ask1 + bid1) / 2.0)
                 # A4: "an event is anything that changes the midpoint price m".
-                if last_mid is None or m != last_mid:
-                    mids.append(m)
-                    last_mid = m
+                if B["last_mid"] is None or m != B["last_mid"]:
+                    B["mids"].append(m)
+                    B["last_mid"] = m
                 prev_mid = m
             else:
                 prev_mid = None
 
-    return {
-        "symbol": symbol,
-        "n_events": n_events,
-        "mo_shares": mo_shares,
-        "lo_sizes": lo_sizes,
-        "zeta_all": zeta_all,
-        "placed": placed,
-        "lifetimes_by_zeta": lifetimes_by_zeta,
-        "spreads": spreads,
-        "mids": mids,
-        "mean_mid": (mid_sum / mid_n) if mid_n else 0.0,
-    }
+    out = []
+    for i, B in enumerate(blocks):
+        out.append({
+            "symbol": symbol,
+            "block": i,
+            "n_events": B["n_events"],
+            "mo_shares": B["mo_shares"],
+            "lo_sizes": B["lo_sizes"],
+            "zeta_all": B["zeta_all"],
+            "placed": B["placed"],
+            "lifetimes_by_zeta": B["lifetimes_by_zeta"],
+            "spreads": B["spreads"],
+            "mids": B["mids"],
+            "mean_mid": (B["mid_sum"] / B["mid_n"]) if B["mid_n"] else 0.0,
+        })
+    return out[0] if len(blocks) == 1 else out
 
 
 def parameters(s):
@@ -454,13 +493,62 @@ def report_regression(name, r, markdown=False):
         print("  confirmation.")
 
 
-def measure_all(symbols, skip_open=0.0, verbose=True):
-    """Measure every symbol. Shared with analysis/validate_scaling.py.
+def _row_from_scan(s):
+    """Turn one scan result into parameters, predictions and measured values."""
+    p = parameters(s)
+    eps, p_c, s_hat, d_hat = predict(p)
+    s_real = (sum(s["spreads"]) / len(s["spreads"])) if s["spreads"] else float("nan")
+    d_real = diffusion_rate(s["mids"])
 
-    The simulator must run on exactly the parameters the empirical test used,
-    or a difference in the measurement would look like a difference in the
-    model. Same reason analysis/compare.py imports stylized_facts rather than
-    reimplementing it.
+    # Nondimensional tick size, the model's SECOND control parameter:
+    # "A non-dimensional scale parameter based on tick size is constructed by
+    # dividing the tick size dp by the characteristic price, i.e.
+    # dp/p_c = dp*alpha/mu ... the properties of the model only depend on the
+    # two non-dimensional parameters eps and dp/p_c."
+    #
+    # In log-price terms one cent on a share priced P is log(P+1c) - log(P).
+    # LOBSTER quotes in units of 1/10000 dollar, so the US Reg NMS minimum
+    # increment of $0.01 is 100 of those units.
+    mm = s["mean_mid"]
+    dp_log = math.log(mm + 100.0) - math.log(mm) if mm > 0 else float("nan")
+    tick_ratio = (dp_log / p_c) if p_c > 0 else float("nan")
+
+    return {"symbol": s["symbol"], "block": s.get("block", 0), **p,
+            "eps": eps, "p_c": p_c, "s_hat": s_hat, "d_hat": d_hat,
+            "s_real": s_real, "d_real": d_real, "n_mid": len(s["mids"]),
+            "price": mm / 10000.0, "dp_log": dp_log, "tick_ratio": tick_ratio}
+
+
+def measure_blocks(symbols, n_blocks, skip_open=0.0, verbose=True):
+    """Per-symbol, per-intraday-block measurements.
+
+    Returns {block_index: [row, ...]}, each inner list sorted by dp/p_c, so the
+    cross-sectional test can be re-run independently inside every block.
+    """
+    by_block = {i: [] for i in range(n_blocks)}
+    for sym in symbols:
+        m, b = find_pair(sym)
+        if not m or not b:
+            print(f"skipping {sym}: no message/orderbook pair", file=sys.stderr)
+            continue
+        if verbose:
+            print(f"scanning {sym} in {n_blocks} blocks ...", file=sys.stderr)
+        for s in scan(sym, m, b, skip_open, n_blocks):
+            if s["n_events"] < 500 or not s["spreads"]:
+                continue          # too thin to estimate anything from
+            by_block[s["block"]].append(_row_from_scan(s))
+    for i in by_block:
+        by_block[i].sort(key=lambda r: r["tick_ratio"])
+    return {i: rs for i, rs in by_block.items() if len(rs) >= 3}
+
+
+def measure_all(symbols, skip_open=0.0, verbose=True):
+    """Measure every symbol over the whole session.
+
+    Shared with analysis/validate_scaling.py: the simulator must run on exactly
+    the parameters the empirical test used, or a difference in the measurement
+    would look like a difference in the model. Same reason analysis/compare.py
+    imports stylized_facts rather than reimplementing it.
     """
     rows = []
     for sym in symbols:
@@ -470,32 +558,96 @@ def measure_all(symbols, skip_open=0.0, verbose=True):
             continue
         if verbose:
             print(f"scanning {sym} ...", file=sys.stderr)
-        s = scan(sym, m, b, skip_open)
-        p = parameters(s)
-        eps, p_c, s_hat, d_hat = predict(p)
-        s_real = (sum(s["spreads"]) / len(s["spreads"])) if s["spreads"] else float("nan")
-        d_real = diffusion_rate(s["mids"])
-
-        # Nondimensional tick size, the model's SECOND control parameter:
-        # "A non-dimensional scale parameter based on tick size is constructed
-        # by dividing the tick size dp by the characteristic price, i.e.
-        # dp/p_c = dp*alpha/mu ... the properties of the model only depend on
-        # the two non-dimensional parameters eps and dp/p_c."
-        #
-        # In log-price terms one cent on a share priced P is log(P+1c) - log(P).
-        # LOBSTER quotes in units of 1/10000 dollar, so the US Reg NMS minimum
-        # increment of $0.01 is 100 of those units.
-        mm = s["mean_mid"]
-        dp_log = math.log(mm + 100.0) - math.log(mm) if mm > 0 else float("nan")
-        tick_ratio = (dp_log / p_c) if p_c > 0 else float("nan")
-
-        rows.append({"symbol": sym, **p, "eps": eps, "p_c": p_c,
-                     "s_hat": s_hat, "d_hat": d_hat,
-                     "s_real": s_real, "d_real": d_real, "n_mid": len(s["mids"]),
-                     "price": mm / 10000.0, "dp_log": dp_log,
-                     "tick_ratio": tick_ratio})
+        rows.append(_row_from_scan(scan(sym, m, b, skip_open)))
     rows.sort(key=lambda r: r["tick_ratio"])
     return rows
+
+
+def report_blocks(symbols, n_blocks, skip_open=0.0):
+    """Re-run the cross-sectional test independently inside each intraday block.
+
+    This is the closest available substitute for the paper's 434 trading days,
+    and it is a substitute for only one of the two things those days buy.
+
+    It DOES give the real side a spread: each stock's ratio now has a mean and a
+    standard deviation instead of a single number, so "GOOG is at 4.36" becomes
+    a claim with a width.
+
+    It does NOT give day-to-day variation. Overnight gaps, news and regime
+    shifts are invisible inside one session, so these error bars are a LOWER
+    BOUND on the true ones. Blocks from one day are also not independent of each
+    other, so "held in 12 of 13 blocks" is a description, not a p-value with 13
+    degrees of freedom behind it.
+    """
+    by_block = measure_blocks(symbols, n_blocks, skip_open)
+    if not by_block:
+        print("\nnot enough data per block", file=sys.stderr)
+        return
+
+    print("\n" + "=" * 72)
+    print(f"INTRADAY BLOCKS -- {len(by_block)} usable blocks of "
+          f"{(SESSION_END - SESSION_START - skip_open) / n_blocks / 60:.0f} min")
+    print("=" * 72)
+
+    # Per stock, across blocks.
+    per_sym = {}
+    for rs in by_block.values():
+        for r in rs:
+            if r["s_hat"] > 0 and r["s_real"] > 0:
+                per_sym.setdefault(r["symbol"], []).append(
+                    (r["tick_ratio"], r["s_real"] / r["s_hat"]))
+
+    hdr = (f"{'sym':<6} {'blocks':>7} {'dp/p_c mean':>12} {'ratio mean':>11} "
+           f"{'ratio sd':>9} {'min':>8} {'max':>8}")
+    print("\nspread ratio, measured independently in each block")
+    print(hdr)
+    print("-" * len(hdr))
+    for sym in sorted(per_sym, key=lambda s: mean_of([t for t, _ in per_sym[s]])):
+        ts = [t for t, _ in per_sym[sym]]
+        rs = [v for _, v in per_sym[sym]]
+        print(f"{sym:<6} {len(rs):>7} {mean_of(ts):>12.2f} {mean_of(rs):>11.2f} "
+              f"{sd_of(rs):>9.2f} {min(rs):>8.2f} {max(rs):>8.2f}")
+
+    # Does the ordering survive block by block?
+    print("\ncross-sectional ordering, re-tested inside each block")
+    print(f"{'block':>6} {'n':>3} {'rho(spread err, dp/p_c)':>25} {'p':>8}")
+    print("-" * 46)
+    perfect = 0
+    positive = 0
+    total = 0
+    for i in sorted(by_block):
+        rs = [r for r in by_block[i] if r["s_hat"] > 0 and r["s_real"] > 0]
+        if len(rs) < 3:
+            continue
+        sp = spearman_exact([r["tick_ratio"] for r in rs],
+                            [r["s_real"] / r["s_hat"] for r in rs])
+        if not sp:
+            continue
+        total += 1
+        if sp["rho"] > 0.999:
+            perfect += 1
+        if sp["rho"] > 0:
+            positive += 1
+        print(f"{i:>6} {len(rs):>3} {sp['rho']:>25.3f} {sp['p']:>8.4f}")
+
+    if total:
+        print(f"\n  positive in {positive}/{total} blocks, "
+              f"perfectly ordered in {perfect}/{total}")
+        print("  Blocks from a single session are correlated, so this is a")
+        print("  consistency check, not 13 independent replications. It answers")
+        print("  'is the ordering an artifact of one measurement window?' and")
+        print("  not 'how many sigma is the effect?'")
+
+
+def mean_of(xs):
+    return sum(xs) / len(xs) if xs else float("nan")
+
+
+def sd_of(xs):
+    if len(xs) < 2:
+        return 0.0
+    m = mean_of(xs)
+    return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
 
 
 def main():
@@ -505,6 +657,9 @@ def main():
                     help="seconds of the session to skip; the paper excludes the "
                          "opening auction, which LOBSTER samples already omit")
     ap.add_argument("--markdown", action="store_true")
+    ap.add_argument("--blocks", type=int, default=0,
+                    help="also split the session into N intraday blocks and "
+                         "re-run the cross-sectional test inside each")
     args = ap.parse_args()
 
     rows = measure_all([x.strip().upper() for x in args.symbols.split(",") if x.strip()],
@@ -598,6 +753,9 @@ def main():
             print(f"    perfectly rank-ordered: the {label} error is monotonic in the")
             print("    model's own nondimensional tick size, which is the scope")
             print("    condition Equation 1 was derived under (the dp -> 0 limit).")
+
+    if args.blocks > 1:
+        report_blocks([r["symbol"] for r in rows], args.blocks, args.skip_open)
 
     print("\npaper, for reference: 11 LSE stocks over 434 trading days,")
     print("  spread     A = 0.99 +/- 0.10, B = 0.06 +/- 0.29, R^2 = 0.96")

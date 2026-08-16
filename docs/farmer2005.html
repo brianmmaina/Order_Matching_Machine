@@ -1,0 +1,110 @@
+<title>Zero Intelligence and the Tick</title>
+<style>
+:root{
+  --bg:#ffffff; --card:#ffffff; --fg:#1a1a1a; --muted:#5c6470;
+  --grid:#e8ebef; --rule:#c3c9d2; --shade:#fdf1e4; --accent:#2f6db3;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#14171c; --card:#1b1f26; --fg:#e8eaed; --muted:#9aa3b0;
+    --grid:#272c35; --rule:#3c434e; --shade:#332618; --accent:#7fb0e6;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#14171c; --card:#1b1f26; --fg:#e8eaed; --muted:#9aa3b0;
+  --grid:#272c35; --rule:#3c434e; --shade:#332618; --accent:#7fb0e6;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);margin:0;padding:2.5rem 1.25rem 4rem;
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+main{max-width:820px;margin:0 auto}
+h1{font-size:1.7rem;line-height:1.25;margin:0 0 .4rem}
+h2{font-size:1.15rem;margin:2.6rem 0 .5rem}
+.sub{color:var(--muted);margin:0 0 2rem}
+.sub a{color:var(--accent)}
+figure{margin:1rem 0 0;overflow-x:auto}
+svg{display:block;min-width:640px;max-width:100%;height:auto;
+  border:1px solid var(--rule);border-radius:8px}
+figcaption{color:var(--muted);font-size:.86rem;margin-top:.6rem}
+.tick{font-size:11px;fill:var(--muted)}
+.axis{font-size:12px;fill:var(--fg)}
+.lbl{font-size:11px;font-weight:600}
+.note{font-size:11px;fill:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:.9rem;margin-top:1rem;
+  font-variant-numeric:tabular-nums}
+th,td{padding:.42rem .6rem;border-bottom:1px solid var(--grid);text-align:right}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:600}
+.key{display:flex;gap:1.4rem;flex-wrap:wrap;color:var(--muted);
+  font-size:.86rem;margin-top:.8rem}
+.key span{display:flex;align-items:center;gap:.4rem}
+.dot{width:11px;height:11px;border-radius:50%;display:inline-block}
+.caveat{border-left:3px solid var(--rule);padding:.1rem 0 .1rem 1rem;
+  color:var(--muted);font-size:.92rem;margin:1.4rem 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
+</style>
+<main>
+<h1>Zero intelligence and the tick</h1>
+<p class="sub">Replicating Farmer, Patelli &amp; Zovko (2005),
+<a href="https://arxiv.org/abs/cond-mat/0309233">&ldquo;The predictive power of
+zero intelligence in financial markets&rdquo;</a>, on five NASDAQ symbols from
+LOBSTER, 2012-06-21. Method and every caveat in
+<code>docs/FARMER_2005.md</code>.</p>
+
+<h2>The law fails, and the failure is ordered by the tick</h2>
+<figure>
+<svg viewBox="0 0 720 420" xmlns="http://www.w3.org/2000/svg" role="img"
+     aria-label="Spread ratio against nondimensional tick size">
+<rect x="0" y="0" width="720" height="420" fill="var(--card)"/><rect x="301.5" y="30" width="388.5" height="330" fill="var(--shade)"/><line x1="301.5" y1="30" x2="301.5" y2="360" stroke="var(--rule)" stroke-width="1" stroke-dasharray="4 3"/><text x="307.5" y="44" class="note">dp/p_c &gt; 1 &mdash; outside the model’s stated domain</text><line x1="136.3" y1="30" x2="136.3" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="136.3" y="378" class="tick" text-anchor="middle">0.2</text><line x1="230.3" y1="30" x2="230.3" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="230.3" y="378" class="tick" text-anchor="middle">0.5</text><line x1="301.5" y1="30" x2="301.5" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="301.5" y="378" class="tick" text-anchor="middle">1</text><line x1="372.6" y1="30" x2="372.6" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="372.6" y="378" class="tick" text-anchor="middle">2</text><line x1="466.6" y1="30" x2="466.6" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="466.6" y="378" class="tick" text-anchor="middle">5</text><line x1="537.8" y1="30" x2="537.8" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="537.8" y="378" class="tick" text-anchor="middle">10</text><line x1="608.9" y1="30" x2="608.9" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="608.9" y="378" class="tick" text-anchor="middle">20</text><line x1="70" y1="345.1" x2="690" y2="345.1" stroke="var(--grid)" stroke-width="1"/><text x="62" y="349.1" class="tick" text-anchor="end">0.5</text><line x1="70" y1="302.6" x2="690" y2="302.6" stroke="var(--grid)" stroke-width="1"/><text x="62" y="306.6" class="tick" text-anchor="end">1</text><line x1="70" y1="260.2" x2="690" y2="260.2" stroke="var(--grid)" stroke-width="1"/><text x="62" y="264.2" class="tick" text-anchor="end">2</text><line x1="70" y1="204.0" x2="690" y2="204.0" stroke="var(--grid)" stroke-width="1"/><text x="62" y="208.0" class="tick" text-anchor="end">5</text><line x1="70" y1="161.5" x2="690" y2="161.5" stroke="var(--grid)" stroke-width="1"/><text x="62" y="165.5" class="tick" text-anchor="end">10</text><line x1="70" y1="119.1" x2="690" y2="119.1" stroke="var(--grid)" stroke-width="1"/><text x="62" y="123.1" class="tick" text-anchor="end">20</text><line x1="70" y1="62.9" x2="690" y2="62.9" stroke="var(--grid)" stroke-width="1"/><text x="62" y="66.9" class="tick" text-anchor="end">50</text><rect x="70" y="30" width="620" height="330" fill="none" stroke="var(--rule)"/><text x="380" y="406" class="axis" text-anchor="middle">dp / p_c   (nondimensional tick size)</text><text x="18" y="195" class="axis" text-anchor="middle" transform="rotate(-90 18 195)">measured spread / predicted spread</text><line x1="141.1" y1="225.6" x2="141.1" y2="200.8" stroke="#2f6db3" stroke-width="1.5"/><line x1="137.1" y1="225.6" x2="145.1" y2="225.6" stroke="#2f6db3" stroke-width="1.5"/><line x1="137.1" y1="200.8" x2="145.1" y2="200.8" stroke="#2f6db3" stroke-width="1.5"/><circle cx="141.1" cy="212.3" r="5.5" fill="#2f6db3" stroke="#2f6db3" stroke-width="2"/><text x="141.1" y="200.3" class="lbl" text-anchor="middle" fill="#2f6db3">GOOG</text><line x1="193.4" y1="232.0" x2="193.4" y2="217.1" stroke="#2f6db3" stroke-width="1.5"/><line x1="189.4" y1="232.0" x2="197.4" y2="232.0" stroke="#2f6db3" stroke-width="1.5"/><line x1="189.4" y1="217.1" x2="197.4" y2="217.1" stroke="#2f6db3" stroke-width="1.5"/><circle cx="193.4" cy="222.5" r="5.5" fill="#2f6db3" stroke="#2f6db3" stroke-width="2"/><text x="193.4" y="210.5" class="lbl" text-anchor="middle" fill="#2f6db3">AAPL</text><line x1="272.7" y1="212.3" x2="272.7" y2="176.0" stroke="#2f6db3" stroke-width="1.5"/><line x1="268.7" y1="212.3" x2="276.7" y2="212.3" stroke="#2f6db3" stroke-width="1.5"/><line x1="268.7" y1="176.0" x2="276.7" y2="176.0" stroke="#2f6db3" stroke-width="1.5"/><circle cx="272.7" cy="196.4" r="5.5" fill="#2f6db3" stroke="#2f6db3" stroke-width="2"/><text x="272.7" y="184.4" class="lbl" text-anchor="middle" fill="#2f6db3">AMZN</text><line x1="594.1" y1="85.0" x2="594.1" y2="68.1" stroke="#d1701c" stroke-width="1.5"/><line x1="590.1" y1="85.0" x2="598.1" y2="85.0" stroke="#d1701c" stroke-width="1.5"/><line x1="590.1" y1="68.1" x2="598.1" y2="68.1" stroke="#d1701c" stroke-width="1.5"/><circle cx="594.1" cy="77.0" r="5.5" fill="#d1701c" stroke="#d1701c" stroke-width="2"/><text x="594.1" y="65.0" class="lbl" text-anchor="middle" fill="#d1701c">INTC</text><line x1="618.9" y1="104.1" x2="618.9" y2="66.1" stroke="#d1701c" stroke-width="1.5"/><line x1="614.9" y1="104.1" x2="622.9" y2="104.1" stroke="#d1701c" stroke-width="1.5"/><line x1="614.9" y1="66.1" x2="622.9" y2="66.1" stroke="#d1701c" stroke-width="1.5"/><circle cx="618.9" cy="62.5" r="5.5" fill="#d1701c" stroke="#d1701c" stroke-width="2"/><text x="618.9" y="50.5" class="lbl" text-anchor="middle" fill="#d1701c">MSFT</text><polyline points="141.1,328.7 193.4,323.0 272.7,313.5 594.1,89.8 618.9,75.3" fill="none" stroke="#111111" stroke-width="1.5" stroke-dasharray="5 4"/><circle cx="141.1" cy="328.7" r="5.5" fill="var(--card)" stroke="#111111" stroke-width="2"/><circle cx="193.4" cy="323.0" r="5.5" fill="var(--card)" stroke="#111111" stroke-width="2"/><circle cx="272.7" cy="313.5" r="5.5" fill="var(--card)" stroke="#111111" stroke-width="2"/><circle cx="594.1" cy="89.8" r="5.5" fill="var(--card)" stroke="#111111" stroke-width="2"/><circle cx="618.9" cy="75.3" r="5.5" fill="var(--card)" stroke="#111111" stroke-width="2"/>
+</svg>
+<figcaption><strong>A correct law gives a horizontal line at any height.</strong>
+The prediction holds only up to an unknown constant, so flatness is the claim,
+not proximity to 1. Error bars are &plusmn;1 sd across
+13 intraday blocks. Dashed line and open circles: the paper&rsquo;s
+own model simulated at each stock&rsquo;s measured parameters and its real tick
+size &mdash; nothing about a cheap stock is present except four flow numbers and
+<code>dp</code>.</figcaption>
+</figure>
+<div class="key">
+<span><i class="dot" style="background:#2f6db3"></i> dp/p_c &lt; 1 &mdash; inside the stated domain</span>
+<span><i class="dot" style="background:#d1701c"></i> dp/p_c &gt; 1 &mdash; tick-constrained</span>
+<span><i class="dot" style="border:2px solid #111111"></i> simulated</span>
+</div>
+
+<table>
+<tr><th>symbol</th><th>price</th><th>dp/p_c</th><th>ratio</th>
+    <th>block mean</th><th>block range</th><th>simulated</th></tr>
+<tr><td>GOOG</td><td>$570.78</td><td>0.21</td><td>4.36</td><td>4.39 &plusmn; 0.88</td><td>2.70&ndash;6.00</td><td>0.65</td></tr><tr><td>AAPL</td><td>$583.15</td><td>0.35</td><td>3.70</td><td>3.60 &plusmn; 0.44</td><td>2.84&ndash;4.60</td><td>0.72</td></tr><tr><td>AMZN</td><td>$222.72</td><td>0.76</td><td>5.66</td><td>6.13 &plusmn; 1.77</td><td>3.45&ndash;9.49</td><td>0.84</td></tr><tr><td>INTC</td><td>$27.05</td><td>17.30</td><td>39.75</td><td>40.43 &plusmn; 5.54</td><td>28.48&ndash;49.89</td><td>32.23</td></tr><tr><td>MSFT</td><td>$30.55</td><td>22.03</td><td>50.35</td><td>36.52 &plusmn; 10.96</td><td>25.32&ndash;55.25</td><td>40.87</td></tr>
+</table>
+
+<p>The three small-tick stocks and the two tick-constrained ones
+<strong>do not overlap across any of the 65 block measurements</strong>.
+Where the simulation is available it tracks the real inflation without having
+seen it.</p>
+
+<h2>The negative control</h2>
+<figure>
+<svg viewBox="0 0 720 420" xmlns="http://www.w3.org/2000/svg" role="img"
+     aria-label="Width scan">
+<rect x="0" y="0" width="720" height="420" fill="var(--card)"/><line x1="93.9" y1="30" x2="93.9" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="93.9" y="378" class="tick" text-anchor="middle">10</text><line x1="217.9" y1="30" x2="217.9" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="217.9" y="378" class="tick" text-anchor="middle">20</text><line x1="381.8" y1="30" x2="381.8" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="381.8" y="378" class="tick" text-anchor="middle">50</text><line x1="505.8" y1="30" x2="505.8" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="505.8" y="378" class="tick" text-anchor="middle">100</text><line x1="629.8" y1="30" x2="629.8" y2="360" stroke="var(--grid)" stroke-width="1"/><text x="629.8" y="378" class="tick" text-anchor="middle">200</text><line x1="70" y1="147.0" x2="690" y2="147.0" stroke="var(--grid)" stroke-width="1"/><text x="62" y="151.0" class="tick" text-anchor="end">50</text><rect x="70" y="30" width="620" height="330" fill="none" stroke="var(--rule)"/><text x="380" y="406" class="axis" text-anchor="middle">truncation width  (characteristic prices)</text><text x="18" y="195" class="axis" text-anchor="middle" transform="rotate(-90 18 195)">simulated spread / predicted</text><polyline points="133.8,195.0 257.8,195.0 381.8,195.0 505.8,195.0 629.8,195.0" fill="none" stroke="#d1701c" stroke-width="2"/><circle cx="133.8" cy="195.0" r="5.5" fill="#d1701c" stroke="#d1701c" stroke-width="2"/><circle cx="257.8" cy="195.0" r="5.5" fill="#d1701c" stroke="#d1701c" stroke-width="2"/><circle cx="381.8" cy="195.0" r="5.5" fill="#d1701c" stroke="#d1701c" stroke-width="2"/><circle cx="505.8" cy="195.0" r="5.5" fill="#d1701c" stroke="#d1701c" stroke-width="2"/><circle cx="629.8" cy="195.0" r="5.5" fill="#d1701c" stroke="#d1701c" stroke-width="2"/>
+</svg>
+<figcaption>The model&rsquo;s deposition intervals are semi-infinite and a
+simulation has to truncate them somewhere. If the answer moved with the
+truncation, the boundary would be setting the spread rather than the order flow
+and the whole result would be an artifact. It does not.
+<br><br>This is not a formality: an earlier version truncated to a fixed price
+box and scanned 32.23, 32.23, 32.23, <strong>0.00</strong>, 32.23. Non-monotonic
+in the width is a bug rather than a boundary effect &mdash; the book could pin
+its best bid against the top of the box, leaving no legal prices for sell orders
+and freezing the market one-sided forever.</figcaption>
+</figure>
+
+<div class="caveat">
+<strong>Read before quoting anything here.</strong> Five stocks and one trading
+day, against the paper&rsquo;s eleven stocks and 434 days. The error bars are
+intraday, so they measure sampling variability and <em>not</em> day-to-day
+variation &mdash; they are a lower bound on the true uncertainty. At n&nbsp;=&nbsp;5
+the smallest attainable exact p-value is 0.017, so the rank results cannot be
+stronger than that however real the effect is.
+</div>
+</main>
