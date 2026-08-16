@@ -387,6 +387,18 @@ std::string OrderBook::debug_dump() const {
     return out;
 }
 
+std::vector<Order> OrderBook::all_orders() const {
+    std::vector<Order> out;
+    for (const auto* side : {&bids_, &asks_}) {
+        for (const auto& lvl : *side) {
+            for (const auto& o : lvl.orders) {
+                out.push_back(o);
+            }
+        }
+    }
+    return out;
+}
+
 bool OrderBook::levels_consistent() const {
     for (const auto* book : {&bids_, &asks_}) {
         for (const auto& lvl : *book) {
