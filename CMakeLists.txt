@@ -70,6 +70,9 @@ target_link_libraries(gateway PRIVATE order_book ome_warnings)
 
 # The load generator needs threads regardless of BUILD_TESTING.
 find_package(Threads REQUIRED)
+add_executable(wal_verify tools/wal_verify.cpp)
+target_link_libraries(wal_verify PRIVATE order_book ome_warnings)
+
 add_executable(loadgen bench/loadgen.cpp)
 target_link_libraries(loadgen PRIVATE order_book ome_warnings Threads::Threads)
 
