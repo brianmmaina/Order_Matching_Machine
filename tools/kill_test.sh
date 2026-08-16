@@ -42,6 +42,11 @@ CLIENTS="${CLIENTS:-4}"
 RATE="${RATE:-500}"
 RISK="${RISK:-config/bench.conf}"
 ARTIFACTS="${ARTIFACTS:-/tmp/kill_test_artifacts}"
+# Snapshots off by default so the harness exercises pure WAL replay. Set
+# SNAPSHOT_EVERY to a command count to test the snapshot+tail path instead —
+# that path has its own failure modes (a torn snapshot, a truncated WAL, the
+# sequence accounting between them) that full replay never touches.
+SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-0}"
 
 for bin in gateway loadgen wal_verify; do
   if [[ ! -x "./build/$bin" ]]; then
@@ -55,9 +60,17 @@ pass=0
 
 for ((i = 1; i <= ITERATIONS; i++)); do
   WAL="/tmp/kill_test_$i.wal"
-  rm -f "$WAL"
+  SNAP="/tmp/kill_test_$i.snap"
+  rm -f "$WAL" "$SNAP" "$SNAP.prev"
 
-  ./build/gateway --wal "$WAL" --risk "$RISK" --port 0 > /tmp/kt_gw.log 2>&1 &
+  # NOTE the ${arr[@]+"${arr[@]}"} form below: bash 3.2, which macOS ships,
+  # treats "${arr[@]}" on an empty array as an unbound variable under set -u.
+  SNAP_ARGS=()
+  if [[ "$SNAPSHOT_EVERY" -gt 0 ]]; then
+    SNAP_ARGS=(--snapshot "$SNAP" --snapshot-every "$SNAPSHOT_EVERY")
+  fi
+
+  ./build/gateway --wal "$WAL" --risk "$RISK" ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} --port 0 > /tmp/kt_gw.log 2>&1 &
   GW=$!
   for _ in $(seq 1 100); do
     grep -q listening /tmp/kt_gw.log 2>/dev/null && break
@@ -93,7 +106,8 @@ for ((i = 1; i <= ITERATIONS; i++)); do
   RECORDS=$(( $(wc -c < "$WAL") / 47 ))
 
   # Recover.
-  ./build/gateway --wal "$WAL" --risk "$RISK" --recover --port 0 > /tmp/kt_rec.log 2>&1 &
+  ./build/gateway --wal "$WAL" --risk "$RISK" ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} --recover --port 0 \
+      > /tmp/kt_rec.log 2>&1 &
   GW2=$!
   for _ in $(seq 1 100); do
     grep -qE "listening|refusing" /tmp/kt_rec.log 2>/dev/null && break
@@ -112,7 +126,11 @@ for ((i = 1; i <= ITERATIONS; i++)); do
   fi
 
   # Independent rebuild. Exit 4 means an invariant was violated.
-  VERIFY=$(./build/wal_verify --wal "$WAL" --risk "$RISK" 2> /tmp/kt_ver.log)
+  VER_ARGS=()
+  if [[ "$SNAPSHOT_EVERY" -gt 0 && -f "$SNAP" ]]; then
+    VER_ARGS=(--snapshot "$SNAP")
+  fi
+  VERIFY=$(./build/wal_verify --wal "$WAL" ${VER_ARGS[@]+"${VER_ARGS[@]}"} --risk "$RISK" 2> /tmp/kt_ver.log)
   VRC=$?
   if [[ $VRC -ne 0 ]]; then
     echo "iteration $i: FAILED — verifier exited $VRC" >&2
@@ -126,7 +144,8 @@ for ((i = 1; i <= ITERATIONS; i++)); do
     echo "  engine:   $ENGINE" >&2
     echo "  verifier: $VERIFY" >&2
     cp "$WAL" "$ARTIFACTS/fail_${i}.wal"
-    ./build/wal_verify --wal "$WAL" --risk "$RISK" --dump > /dev/null \
+    [[ -f "$SNAP" ]] && cp "$SNAP" "$ARTIFACTS/fail_${i}.snap"
+    ./build/wal_verify --wal "$WAL" ${VER_ARGS[@]+"${VER_ARGS[@]}"} --risk "$RISK" --dump > /dev/null \
         2> "$ARTIFACTS/fail_${i}_verifier_book.txt"
     echo "artifacts in $ARTIFACTS — reproduce with:" >&2
     echo "  ./build/wal_verify --wal $ARTIFACTS/fail_${i}.wal --risk $RISK --dump" >&2
@@ -136,7 +155,7 @@ for ((i = 1; i <= ITERATIONS; i++)); do
   pass=$((pass + 1))
   printf "iteration %2d/%d  killed after %ss  %5d records  digest %s  OK\n" \
     "$i" "$ITERATIONS" "$SLEEP" "$RECORDS" "${ENGINE:0:12}"
-  rm -f "$WAL"
+  rm -f "$WAL" "$SNAP" "$SNAP.prev"
 done
 
 echo

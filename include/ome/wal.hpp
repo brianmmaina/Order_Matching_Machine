@@ -294,11 +294,18 @@ public:
         }
 
         std::vector<std::uint8_t> out;
-        std::uint64_t seq = 0;
+        // Start from the log's OWN first sequence, not 1. This log may already
+        // have been truncated once, in which case it begins partway through.
+        //
+        // Counting from 1 here worked on the first truncation and silently
+        // renumbered every record on the second, which produced a genuine
+        // sequence gap and a gateway that refused to start. Found by the kill
+        // harness at iteration 17, not by any unit test.
+        std::uint64_t seq = rd.first_seq;
         std::uint64_t kept = 0;
         for (const auto& c : rd.commands) {
-            ++seq;
             if (seq <= keep_after) {
+                ++seq;
                 continue;
             }
             std::vector<std::uint8_t> payload;
@@ -311,6 +318,7 @@ public:
             protocol::detail::put_u64(out, seq);
             out.insert(out.end(), payload.begin(), payload.end());
             ++kept;
+            ++seq;
         }
 
         const std::string tmp = path_ + ".tmp";
