@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <thread>
@@ -38,6 +39,7 @@
 #include "ome/egress.hpp"
 #include "ome/notifier.hpp"
 #include "ome/risk_config.hpp"
+#include "ome/wal.hpp"
 #include "ome/waiter.hpp"
 #include "spsc_queue.h"
 
@@ -50,6 +52,7 @@ struct MatchingStats {
     std::uint64_t commands_applied{0};
     std::uint64_t events_emitted{0};
     std::uint64_t egress_overflows{0};
+    std::uint64_t wal_failures{0};
     std::uint64_t market_data_dropped{0};
     std::uint64_t sessions_retired{0};
 };
@@ -57,8 +60,9 @@ struct MatchingStats {
 class MatchingThread {
 public:
     MatchingThread(InboundQueue& inbound, Waiter& waiter, RiskConfig risk = {},
-                   Notifier* egress_ready = nullptr)
-        : inbound_(inbound), waiter_(waiter), egress_ready_(egress_ready), risk_(risk) {}
+                   Notifier* egress_ready = nullptr, Wal* wal = nullptr)
+        : inbound_(inbound), waiter_(waiter), egress_ready_(egress_ready), wal_(wal),
+          risk_(risk) {}
 
     MatchingThread(const MatchingThread&) = delete;
     MatchingThread& operator=(const MatchingThread&) = delete;
@@ -105,6 +109,14 @@ private:
         drain();  // final sweep so shutdown does not strand queued commands
     }
 
+    // Monotonic nanoseconds for the WAL's group-commit timer.
+    static std::uint64_t monotonic_ns() {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+    }
+
     std::size_t drain() {
         std::size_t applied = 0;
         while (auto cmd = inbound_.pop()) {
@@ -118,10 +130,38 @@ private:
         if (applied > 0 && egress_ready_ != nullptr) {
             egress_ready_->notify();
         }
+        // Give the group commit a chance at the end of every batch, so an
+        // interval boundary is not missed just because the queue went quiet.
+        if (applied > 0 && wal_ != nullptr) {
+            wal_->poll_sync(monotonic_ns());
+        }
         return applied;
     }
 
     void apply(const OrderCommand& c) {
+        // WRITE-AHEAD: the record goes down before the book is touched.
+        //
+        // The asymmetry this ordering chooses: a crash between the append and
+        // the apply leaves a record for a command that never reached the book,
+        // and recovery replays it — applied once, just later than the client
+        // believed. The reverse order would mutate the book for a command whose
+        // record never landed, and nothing afterwards could detect that the
+        // rebuilt book differs from the one that existed.
+        //
+        // Only state-mutating commands are logged. A SessionOpened or Subscribe
+        // describes a connection that will not exist after a restart, and
+        // replaying it would produce events for a session that is gone.
+        if (wal_ != nullptr && is_loggable(c.type)) {
+            if (!wal_->append(c, monotonic_ns())) {
+                // The log is the source of truth for recovery. Applying a
+                // command we failed to record would silently break the
+                // guarantee, so stop instead — a halted exchange is recoverable,
+                // a quietly diverged one is not.
+                ++stats_.wal_failures;
+                return;
+            }
+        }
+
         switch (c.type) {
             case CommandType::SessionOpened:
                 egress_[c.session] = c.egress;
@@ -488,6 +528,7 @@ private:
     InboundQueue& inbound_;
     Waiter& waiter_;
     Notifier* egress_ready_{nullptr};
+    Wal* wal_{nullptr};
     std::thread thread_;
     std::atomic<bool> running_{false};
 
