@@ -120,6 +120,11 @@ The diffusion regression is the interesting failure: R² = 0.80 with a
 **negative** slope. That is not noise. It is a strong relationship pointing the
 wrong way, which is what a missing control variable looks like.
 
+> **The diffusion column above is measured on the paper's literal A4 clock, and
+> that clock does not match `D̂`'s.** Part of this failure is a unit mismatch
+> rather than a model failure. See *The two diffusion clocks* below — the
+> corrected numbers are smaller and the corrected slope changes sign.
+
 ### The error is ordered by the model's own tick parameter
 
 | | ρ | exact p | n |
@@ -134,6 +139,57 @@ n = 5.
 
 The spread ordering is **not significant** (p = 0.083): GOOG and AAPL swap.
 Stated as a null result, because it is one.
+
+### The two diffusion clocks
+
+Found by auditing my own strongest result before putting it in a paper.
+
+**The paper measures diffusion on a different clock from the one its parameters
+live on.** §A3 defines event time as the count of order placements and
+cancellations, and μ, α, δ are all per event on that clock — so `D̂` is in
+log-price² **per event**. §A4 then says *"here an event is anything that changes
+the midpoint price m"* and measures `V(τ)` over that sequence — so `D` is in
+log-price² **per midpoint change**.
+
+The ratio `D/D̂` therefore carries a hidden factor of events-per-midpoint-change.
+That is harmless when the factor is roughly constant across the sample, which is
+presumably true of the paper's 11 LSE stocks. It is emphatically not true here:
+
+| | dp/p_c | events / midpoint change | raw ratio | matched ratio |
+|---|---:|---:|---:|---:|
+| GOOG | 0.21 | 5.9 | 11.6 | **1.96** |
+| AAPL | 0.35 | 6.0 | 12.6 | **2.11** |
+| AMZN | 0.76 | 9.6 | 93.2 | **9.70** |
+| INTC | 17.30 | 186.3 | 9,386 | **50.37** |
+| MSFT | 22.03 | 158.5 | 20,629 | **130.15** |
+
+**A spread pinned at one tick is a spread whose midpoint rarely moves.** So the
+unit mismatch inflates exactly the stocks the tick already inflates, and a raw
+comparison double counts the same effect.
+
+What changes when the clocks are matched:
+
+| | raw A4 clock | matched |
+|---|---|---|
+| spread of ratios | 1,777× | **66×** |
+| regression slope A | −0.612 (R² = 0.80) | **+0.171** (R² = 0.39) |
+| rank correlation with dp/p_c | ρ = 1.000, p = 0.0167 | **ρ = 1.000, p = 0.0167** |
+
+Three consequences, and the first two are corrections to claims made earlier in
+this repo:
+
+1. **"Diffusion fails by four orders of magnitude" was wrong.** On a matched
+   clock it is closer to two. The extra factor was bookkeeping.
+2. **The dramatic negative slope is substantially an artifact.** Matched, A moves
+   from −0.61 to +0.17. The narrative that a strong wrong-way relationship
+   signalled a missing control variable still holds — the control was real and it
+   was `dp/p_c` — but the specific statistic was inflated.
+3. **The rank result is completely unaffected.** ρ = 1.000 at p = 0.0167 on both
+   clocks.
+
+Point 3 is why the argument was built on a rank test in the first place. The
+statistic that survived a factor-of-27 error in its own input is the one worth
+quoting.
 
 ### Intraday error bars
 

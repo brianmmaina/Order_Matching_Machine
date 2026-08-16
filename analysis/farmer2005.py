@@ -513,9 +513,39 @@ def _row_from_scan(s):
     dp_log = math.log(mm + 100.0) - math.log(mm) if mm > 0 else float("nan")
     tick_ratio = (dp_log / p_c) if p_c > 0 else float("nan")
 
+    # ---- the two diffusion clocks -------------------------------------
+    #
+    # The paper measures diffusion on a DIFFERENT clock from the one its
+    # parameters live on, and in this sample that matters enormously.
+    #
+    # A3 defines event time as the count of order placements and cancellations,
+    # and mu, alpha, delta are all per event on that clock. So D_hat is in
+    # log-price^2 per event.
+    #
+    # A4 then says "here an event is anything that changes the midpoint price
+    # m", and measures V(tau) over that sequence. So D_real is in log-price^2
+    # per MIDPOINT CHANGE.
+    #
+    # The ratio D_real/D_hat therefore carries a hidden factor of events per
+    # midpoint change. That is harmless if the factor is roughly constant across
+    # the sample, which is presumably true of the paper's 11 LSE stocks. It is
+    # emphatically not true here: the factor is ~6 for GOOG and ~186 for INTC,
+    # because a spread pinned at one tick is a spread whose midpoint rarely
+    # moves. The tick constraint suppresses midpoint changes directly, so the
+    # unit mismatch inflates exactly the stocks the tick already inflates, and
+    # a raw comparison double counts it.
+    #
+    # Both are reported. d_real is the literal A4 quantity; d_real_ev converts
+    # it to the same per-event clock as D_hat, which is the apples-to-apples
+    # comparison.
+    n_mid = len(s["mids"])
+    ev_per_midchg = (p["n_events"] / n_mid) if n_mid else float("nan")
+    d_real_ev = (d_real / ev_per_midchg) if ev_per_midchg > 0 else float("nan")
+
     return {"symbol": s["symbol"], "block": s.get("block", 0), **p,
             "eps": eps, "p_c": p_c, "s_hat": s_hat, "d_hat": d_hat,
-            "s_real": s_real, "d_real": d_real, "n_mid": len(s["mids"]),
+            "s_real": s_real, "d_real": d_real, "n_mid": n_mid,
+            "ev_per_midchg": ev_per_midchg, "d_real_ev": d_real_ev,
             "price": mm / 10000.0, "dp_log": dp_log, "tick_ratio": tick_ratio}
 
 
@@ -705,6 +735,28 @@ def main():
     print("  prediction is up to an overall constant (k, and the price window).")
     print("  So read the ratio column for spread, not scatter.")
 
+    # The two diffusion clocks. See _row_from_scan for why these differ.
+    print("\ndiffusion on a matched clock")
+    hdr3 = (f"{'sym':<6} {'dp/p_c':>8} {'ev/midchg':>10} {'raw ratio':>12} "
+            f"{'matched':>10}")
+    print(hdr3)
+    print("-" * len(hdr3))
+    for r in rows:
+        dratio = (r["d_real"] / r["d_hat"]) if r["d_hat"] else float("nan")
+        dev = (r["d_real_ev"] / r["d_hat"]) if r["d_hat"] else float("nan")
+        print(f"{r['symbol']:<6} {r['tick_ratio']:>8.2f} "
+              f"{r['ev_per_midchg']:>10.1f} {dratio:>12.1f} {dev:>10.2f}")
+    raws = [r["d_real"] / r["d_hat"] for r in rows if r["d_hat"] > 0]
+    matched = [r["d_real_ev"] / r["d_hat"] for r in rows if r["d_hat"] > 0]
+    if raws and matched:
+        print(f"\n  spread of raw ratios      {max(raws) / min(raws):>8.0f}x")
+        print(f"  spread of matched ratios  {max(matched) / min(matched):>8.0f}x")
+    print("  D_hat is per event; the raw D_real is per MIDPOINT CHANGE, and this")
+    print("  sample's events-per-midpoint-change runs from 6 to 186. A pinned")
+    print("  spread is a spread whose midpoint rarely moves, so the mismatch")
+    print("  inflates exactly the stocks the tick already inflates. The matched")
+    print("  column is the apples-to-apples comparison; the raw one double counts.")
+
     def ok(rs, key_hat, key_real):
         return [r for r in rs if r[key_hat] > 0 and r[key_real] > 0
                 and not math.isnan(r[key_hat]) and not math.isnan(r[key_real])]
@@ -713,9 +765,12 @@ def main():
         report_regression(f"spread {label}:    log s = A log s_hat + B",
                           regress([math.log(r["s_hat"]) for r in ok(rs, "s_hat", "s_real")],
                                   [math.log(r["s_real"]) for r in ok(rs, "s_hat", "s_real")]))
-        report_regression(f"diffusion {label}: log D = A log D_hat + B",
+        report_regression(f"diffusion {label}, raw A4 clock:  log D = A log D_hat + B",
                           regress([math.log(r["d_hat"]) for r in ok(rs, "d_hat", "d_real")],
                                   [math.log(r["d_real"]) for r in ok(rs, "d_hat", "d_real")]))
+        report_regression(f"diffusion {label}, matched clock: log D = A log D_hat + B",
+                          regress([math.log(r["d_hat"]) for r in ok(rs, "d_hat", "d_real_ev")],
+                                  [math.log(r["d_real_ev"]) for r in ok(rs, "d_hat", "d_real_ev")]))
 
     print("\n" + "=" * 72)
     print("ALL STOCKS")
@@ -742,8 +797,10 @@ def main():
     print("DOES dp/p_c EXPLAIN THE ERROR?")
     print("=" * 72)
     tr = [r["tick_ratio"] for r in rows]
-    for label, key in (("spread", "s"), ("diffusion", "d")):
-        err = [r[f"{key}_real"] / r[f"{key}_hat"] for r in rows]
+    for label, num, den in (("spread", "s_real", "s_hat"),
+                            ("diffusion (raw A4 clock)", "d_real", "d_hat"),
+                            ("diffusion (matched clock)", "d_real_ev", "d_hat")):
+        err = [r[num] / r[den] for r in rows]
         sp = spearman_exact(tr, err)
         if sp is None:
             continue

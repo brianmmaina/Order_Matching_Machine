@@ -152,10 +152,19 @@ tests it **cross-sectionally** — across stocks, regressing `log s = A·log ŝ 
 and asking whether A = 1. On 11 LSE stocks it gets A = 0.99 ± 0.10, R² = 0.96.
 
 [`analysis/farmer2005.py`](analysis/farmer2005.py) reruns that test on the five
-LOBSTER symbols. **Both laws fail**, diffusion by four orders of magnitude — but
-the failure is ordered by `dp/p_c`, the model's own nondimensional tick size,
-which Equation 1 assumes away by taking `dp → 0`. A penny on a $27 stock is
-seventeen times the characteristic price scale of its own order flow.
+LOBSTER symbols. **Both laws fail** — but the failure is ordered by `dp/p_c`, the
+model's own nondimensional tick size, which Equation 1 assumes away by taking
+`dp → 0`. A penny on a $27 stock is seventeen times the characteristic price
+scale of its own order flow.
+
+Auditing that result turned up a real problem worth stating: **the paper measures
+diffusion on a different clock from the one its parameters live on** — `D̂` is per
+event, `D` is per *midpoint change*, and this sample runs from 6 to 186 events
+per midpoint change. A pinned spread is one whose midpoint rarely moves, so the
+mismatch inflates exactly the stocks the tick already inflates. Correcting it
+shrinks the diffusion failure from 1,777× to 66× and flips the regression slope
+from −0.61 to +0.17. **The rank result is unchanged at ρ = 1.000, p = 0.017** —
+which is why the argument rests on it.
 
 That is a correlation on five points, and `dp/p_c` is large for exactly the two
 cheapest stocks. [`tools/zi_paper.cpp`](tools/zi_paper.cpp) separates cause from
