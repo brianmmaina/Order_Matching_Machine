@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Stylized facts measured directly from LOBSTER message data.
 
-R0 of OME_RESEARCH_PLAN.md. No simulation, no matching engine, and — crucially —
-no book reconstruction: every statistic here comes straight from the message
-stream, where the data is exact.
+No simulation, no matching engine, and — crucially — no book reconstruction:
+every statistic here comes straight from the message stream, where the data is
+exact.
 
 That constraint is the point. Book reconstruction is currently 50-70% accurate,
 so any statistic derived from a reconstructed book is contaminated. Returns,
 trade signs, impact and the cancel ratio are all in the messages themselves and
 are unaffected.
 
-This is the de-risking step: if 269K messages of one stock on one day cannot
-show these effects, the zero-intelligence comparison has nothing to compare and
-the research plan stops here having cost one sitting.
+These are the baseline against which a synthetic order-flow model would be
+compared: if 269K messages of one stock on one day cannot show these effects,
+there is nothing to compare a model against.
 
 Pure standard library, matching the project's dependency rule. Everything below
 is a few lines of arithmetic; pulling in numpy would buy speed we do not need on
@@ -160,7 +160,7 @@ def effective_spread(trades):
     were not. That statistic measures bid-ask bounce, not direction: in a
     penny-spread stock consecutive trades alternate across the spread, so the
     print after a buy is usually LOWER. The lesson generalises — see the note on
-    price impact in OME_RESEARCH_PLAN.md.
+    price impact below.
     """
     diffs = []
     for (pa, sa), (pb, sb) in zip([(t[1], t[3]) for t in trades],
@@ -278,7 +278,7 @@ def print_report(rs, markdown=False):
         print("# Stylized facts from LOBSTER message data\n")
         print("Measured by `analysis/stylized_facts.py` directly from the message")
         print("stream — no book reconstruction, so none of these numbers are affected")
-        print("by the replay accuracy gap. See `OME_RESEARCH_PLAN.md` (R0).\n")
+        print("by the replay accuracy gap.\n")
         print("Sample: NASDAQ, 2012-06-21, one full session per symbol.\n")
 
     print(f"{h1}Sample composition\n")
