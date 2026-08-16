@@ -66,7 +66,7 @@ std::vector<OrderCommand> random_stream(std::uint32_t seed, int n) {
     std::uint64_t next_coid = 1;
 
     for (int i = 0; i < n; ++i) {
-        const SessionId s = 1 + (rng() % 3);
+        const auto s = static_cast<SessionId>(1 + (rng() % 3));
         const int roll = static_cast<int>(rng() % 100);
 
         if (roll < 65 || live.empty()) {
@@ -74,22 +74,22 @@ std::vector<OrderCommand> random_stream(std::uint32_t seed, int n) {
             // fill, rather than resting harmlessly at distinct levels.
             const std::int64_t px = 999500 + static_cast<std::int64_t>(rng() % 11) * 100;
             const auto side = (rng() % 2) ? protocol::Side::Bid : protocol::Side::Ask;
-            const std::uint32_t qty = 1 + (rng() % 50);
+            const auto qty = static_cast<std::uint32_t>(1 + (rng() % 50));
             const std::uint64_t coid = next_coid++;
             out.push_back(order(s, coid, px, qty, side));
             live.emplace_back(s, coid);
         } else if (roll < 85) {
-            const auto& t = live[rng() % live.size()];
+            const auto& t = live[static_cast<std::size_t>(rng()) % live.size()];
             out.push_back(OrderCommand::cancel(t.first, t.second));
         } else if (roll < 97) {
-            const auto& t = live[rng() % live.size()];
+            const auto& t = live[static_cast<std::size_t>(rng()) % live.size()];
             protocol::Modify m{};
             m.client_order_id = t.second;
             m.new_price_ticks = 999500 + static_cast<std::int64_t>(rng() % 11) * 100;
-            m.new_quantity = 1 + (rng() % 50);
+            m.new_quantity = static_cast<std::uint32_t>(1 + (rng() % 50));
             out.push_back(OrderCommand::modify(t.first, m));
         } else {
-            out.push_back(OrderCommand::cancel_all(1 + (rng() % 3)));
+            out.push_back(OrderCommand::cancel_all(static_cast<SessionId>(1 + (rng() % 3))));
         }
     }
     return out;
