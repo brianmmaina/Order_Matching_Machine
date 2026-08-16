@@ -21,7 +21,13 @@ survive being killed. No dependencies beyond GoogleTest.
 
 ## Architecture
 
-![architecture](docs/architecture.svg)
+```
+clients --TCP--> [network thread] --SPSC--> [matching thread] --> WAL
+                        ^                          |            snapshots
+                        |                          v
+                        +---- per-session SPSC ----+
+                             order events + book snapshots
+```
 
 **The book is single-writer.** One thread owns every mutation, so there is no
 lock anywhere near it. Concurrency lives entirely at the edges — network I/O and
