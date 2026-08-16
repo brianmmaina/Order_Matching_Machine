@@ -217,6 +217,79 @@ to the last trade or the mid and only that thread may read the book.
 
 ---
 
+## Market data analysis
+
+[`analysis/stylized_facts.py`](analysis/stylized_facts.py) measures classic
+microstructure facts directly from the LOBSTER message stream — no book
+reconstruction, so none of it is affected by the replay accuracy gap. Results in
+[`docs/STYLIZED_FACTS.md`](docs/STYLIZED_FACTS.md).
+
+Across five symbols: **91–96% of submitted orders are cancelled rather than
+executed**, trade-sign autocorrelation runs **0.72–0.91 at lag 1** and decays
+slowly, and trade-level returns show excess kurtosis of 12–24.
+
+Volatility clustering splits by tick constraint: clearly present in AAPL, AMZN
+and GOOG at a 10-second horizon, and undetectable in INTC and MSFT — the two
+low-priced names, pinned at a one-cent spread, where discrete bounce drowns the
+signal.
+
+## Replicating Farmer, Patelli & Zovko (2005)
+
+[`analysis/farmer2005.py`](analysis/farmer2005.py) tests the two scaling laws
+from [*The predictive power of zero intelligence in financial
+markets*](https://arxiv.org/abs/cond-mat/0309233) (PNAS 102(6):2254–2259)
+against the five LOBSTER symbols. Full writeup in
+[`docs/FARMER_2005.md`](docs/FARMER_2005.md).
+
+The paper predicts a stock's mean spread and price diffusion rate from its
+order flow alone — `ŝ = (μ/α)·f(ε)` — and tests it **cross-sectionally**, by
+regressing `log s = A·log ŝ + B` and asking whether A = 1.
+
+Across all five symbols both laws fail, the diffusion rate by up to four orders
+of magnitude. But the failure is not random: **the error is perfectly
+rank-ordered by `dp/p_c`**, the model's own nondimensional tick size (ρ = 1.000,
+exact p = 0.017 by enumerating all 120 permutations — a rank test rather than a
+regression, because five points cannot support a regression). Equation 1 is
+derived in the limit `dp → 0`, and INTC and MSFT sit at `dp/p_c` of 17 and 22 —
+a penny on a $27 stock is seventeen times the characteristic price scale of its
+own order flow.
+
+Inside the model's stated domain (`dp/p_c < 1`: GOOG, AAPL, AMZN) the spread
+ratio is constant within a factor of 1.5, which is what the law predicts. So
+the paper is not refuted here; it is confirmed in the weak sense five stocks
+allow, and the tick constraint is what a naive replication would have
+misreported as a refutation.
+
+That much is a correlation on five points, and `dp/p_c` is large for exactly
+the two cheapest stocks — so plenty of other things could produce the same
+ordering. [`tools/zi_paper.cpp`](tools/zi_paper.cpp) separates them by
+simulating the paper's model on this project's matching engine at each stock's
+measured parameters and its **real tick size**, where nothing about a cheap
+stock is present except four flow parameters and `dp`:
+
+| | dp/p_c | simulated ratio | real ratio | sim/real |
+|---|---:|---:|---:|---:|
+| GOOG | 0.21 | 0.66 | 4.36 | 0.15 |
+| AMZN | 0.76 | 0.83 | 5.66 | 0.15 |
+| INTC | 17.30 | **32.23** | **39.75** | **0.81** |
+| MSFT | 22.03 | **40.87** | **50.35** | **0.81** |
+
+**The tick alone reproduces 81% of the observed inflation**, the same fraction
+for both constrained stocks, and the simulated inflation is perfectly
+rank-ordered by `dp/p_c` (ρ = 1.000, p = 0.017). The remaining 19% is real and
+is presumably what the model deletes — strategic quoting, hidden liquidity,
+heterogeneous sizes.
+
+It doubles as an independent exercise of the matching engine: a continuous
+double auction driven for millions of events against an analytically known
+answer, agreeing with it to within a constant wherever that answer applies.
+
+The earlier stylized-facts comparison in
+[`docs/ZI_COMPARISON.md`](docs/ZI_COMPARISON.md) tests properties this paper
+never claims, and says so at the top.
+
+---
+
 ## Limitations
 
 Specific rather than hedged. Most are deliberate; all are real.
