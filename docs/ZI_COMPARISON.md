@@ -2,64 +2,93 @@
 
 Synthetic order flow, calibrated to AMZN (`docs/CALIBRATION.md`) and matched by
 the same `MatchingEngine` the gateway uses, compared against the real LOBSTER
-stream. Both are analysed by `analysis/stylized_facts.py` — the same code,
-unchanged, because the simulator writes its message log in LOBSTER's schema.
+stream.
 
-Single seed, one 6.5-hour session. Error bars across seeds are still to come.
+Both sides are measured by the same code — `analysis/compare.py` imports
+`stylized_facts.analyse` rather than reimplementing it — because a difference in
+the analysis would be indistinguishable from a difference in the market.
 
-## Structural properties: broadly reproduced
+**30 seeds**, one 6.5-hour session each.
 
-| | Real AMZN | ZI |
-|---|---|---|
-| Cancels / new orders | 95.8% | **88.2%** |
-| Executions / new orders | 6.8% | 14.4% |
-| Median effective spread | 300 ticks | 691 |
-| Messages | 269,748 | 269,893 |
+```bash
+python3 analysis/compare.py --symbol AMZN --seeds 30
+```
 
-Order flow that is cancelled rather than executed, at roughly nine in ten, falls
-straight out of the calibrated arrival and cancellation rates. Nothing in the
-model intends it.
+## Results
 
-## Dynamic properties: reproduced at lag 1, absent thereafter
+| Statistic | Real AMZN | ZI mean | ZI sd | rel | z | Verdict |
+|---|---|---|---|---|---|---|
+| cancels / new | 95.772 | 87.847 | 0.457 | 8% | +17.3 | NOT reproduced |
+| executions / new | 6.801 | 14.321 | 0.149 | 111% | -50.3 | NOT reproduced |
+| effective spread (ticks) | 300.000 | 693.433 | 8.928 | 131% | -44.1 | NOT reproduced |
+| trade-level kurtosis | 11.756 | 174.993 | 117.047 | 1389% | -1.4 | inconclusive (model too variable) |
+| sign ACF lag 1 | 0.720 | 0.468 | 0.006 | 35% | +42.5 | NOT reproduced |
+| sign ACF lag 2 | 0.575 | 0.174 | 0.009 | 70% | +46.6 | NOT reproduced |
+| sign ACF lag 5 | 0.340 | 0.015 | 0.008 | 96% | +40.7 | NOT reproduced |
+| sign ACF lag 10 | 0.205 | 0.007 | 0.009 | 97% | +22.9 | NOT reproduced |
+| sign ACF lag 50 | 0.085 | -0.001 | 0.009 | 101% | +9.4 | NOT reproduced |
+| |ret| ACF 10s lag 1 | 0.155 | 0.376 | 0.043 | 143% | -5.1 | inconclusive (model too variable) |
+| |ret| ACF 10s lag 2 | 0.087 | 0.015 | 0.029 | 82% | +2.5 | inconclusive (model too variable) |
+| |ret| ACF 10s lag 5 | 0.036 | 0.010 | 0.031 | 74% | +0.9 | both ~0 |
 
-**Trade-sign autocorrelation**
+`rel` is relative error; `z` is `(real − zi_mean) / zi_sd`.
 
-| Lag | 1 | 2 | 5 | 10 | 20 | 50 | 100 |
-|---|---|---|---|---|---|---|---|
-| Real | 0.720 | 0.575 | 0.340 | 0.205 | 0.132 | 0.085 | 0.009 |
-| ZI | 0.474 | 0.183 | 0.016 | 0.013 | −0.003 | −0.007 | −0.005 |
+**Both columns are necessary, and either alone misleads.** A precise model can be
+many sigma from the truth while only a few percent wrong — it captures the
+phenomenon and misses the value. A noisy model can be an order of magnitude
+wrong and one sigma away — it captures nothing and merely cannot be excluded.
+Trade-level kurtosis is the second case: 175 against a real 11.8, which is 1,389%
+wrong and |z| = 1.4.
 
-**Volatility clustering, |10-second returns|**
+## What this actually says
 
-| Lag | 1 | 2 | 3 | 5 | 10 |
+**Nothing here is reproduced.** With 30 seeds the model's own variance is small
+enough that every real value sits far outside it.
+
+That is a sharper and more negative result than a single seed suggested. The
+first version of this document, written from one run, called the structural
+properties "broadly reproduced" on the strength of an 88% cancel ratio against a
+real 96%. With error bars that gap is **17 standard deviations**. The model is
+internally consistent — seed to seed it lands on 87.8% ± 0.5% — and consistently
+in the wrong place. Being precise is not the same as being right, and one draw
+could not tell the difference.
+
+**The cancel ratio is the model's best showing anyway.** 8% relative error, and
+qualitatively it gets the fact that matters: a book made overwhelmingly of orders
+that will be withdrawn. That falls out of calibrated arrival and cancellation
+rates with nothing intending it.
+
+**Trade-sign autocorrelation is where the model fails completely, and it fails in
+a specific shape.**
+
+| Lag | 1 | 2 | 5 | 10 | 50 |
 |---|---|---|---|---|---|
-| Real | 0.155 | 0.087 | 0.098 | 0.036 | 0.078 |
-| ZI | 0.378 | 0.014 | 0.010 | −0.010 | 0.002 |
+| Real | 0.720 | 0.575 | 0.340 | 0.205 | 0.085 |
+| ZI mean | 0.468 | 0.174 | 0.015 | 0.007 | −0.001 |
+| relative error | 35% | 70% | **96%** | **97%** | **101%** |
 
-This is the result. **ZI produces correlation at lag 1 and none beyond it.**
+At lag 1 the model is only 35% low. By lag 5 it is 96% low, and past that it has
+nothing at all. The lag-1 value is not memory — it is mechanical, one market
+order walking several price levels and printing several same-signed executions
+in the same instant. Any model with multi-level fills produces it.
 
-The lag-1 value is not evidence of memory — it is mechanical. One market order
-walks several price levels and prints several executions, all with the same
-sign, within the same instant. Any model with multi-level fills produces that.
-It is gone by lag 5.
+Real order flow decays slowly over a hundred trades. **The question is not
+whether correlation exists but how far it reaches**, and only that separates the
+two. Deleting strategic behaviour deletes the reach entirely while leaving the
+mechanical artifact intact — which is exactly the distinction the experiment was
+built to draw.
 
-Real order flow decays slowly over a hundred trades. That persistence is what
-strategic behaviour looks like from the outside — order splitting, participants
-reacting to each other — and deleting the strategy deletes it entirely. The
-distinction is not "does correlation exist" but "how far does it reach", and
-only the second one separates the two.
+## The failure that shaped the model
 
-## A failure worth recording
-
-The first version placed limit orders relative to the **instantaneous**
+The first generator placed limit orders relative to the **instantaneous**
 half-spread, which destroyed the market:
 
 | | Real | Adaptive scale | Fixed scale |
 |---|---|---|---|
-| Cancels / new | 95.8% | 8.5% | 88.2% |
-| Executions / new | 6.8% | 96.7% | 14.4% |
-| Effective spread | 300 | **1 tick** | 691 |
-| Trade-level kurtosis | 11.8 | **9,833** | 155 |
+| Cancels / new | 95.8% | 8.5% | 87.8% |
+| Executions / new | 6.8% | 96.7% | 14.3% |
+| Effective spread | 300 ticks | **1 tick** | 693 |
+| Trade-level kurtosis | 11.8 | **9,833** | 175 |
 
 Orders placed inside the spread narrow it; a narrower spread makes the next
 order's offset smaller in ticks; within seconds the book collapses to one tick
@@ -70,16 +99,20 @@ Using the calibrated median spread as the placement scale breaks the loop: it is
 exogenous and does not move with the book. The instantaneous spread still sets
 the reference price; it no longer sets the scale.
 
-The broken behaviour is preserved behind `--adaptive-scale` so it stays
-reproducible rather than becoming a story about something that used to happen.
+Preserved behind `--adaptive-scale` so the failure stays reproducible.
 
-## Known gaps
+## Limits of this comparison
 
-- **Kurtosis is 155 against a real 11.8.** Returns are far too heavy-tailed.
-  Likely the same mechanism as the lag-1 sign correlation: market orders walk
-  too deep because the synthetic book is thinner than the real one.
-- **Executions per order are 2× too high** (14.4% vs 6.8%), for the same reason.
-- **Single seed.** Every number here is one draw. Multi-seed runs with error
-  bars are the next step; nothing above should be treated as settled.
+- **The real side is a single session** and has no error bar. A real value
+  outside the synthetic spread is meaningful; one inside would mean the model is
+  *not excluded*, which is weaker than the model being right.
+- **One symbol, one day, 2012.** Nothing here generalises to markets.
+- **The synthetic book is thinner than the real one**, so market orders walk too
+  deep. That is the likely common cause of the excess kurtosis, the excess
+  execution rate, and the inflated lag-1 correlation.
 - **Hidden liquidity is not modelled** — 21% of real executions.
-- **The cancel rate is an overestimate by construction** (`docs/CALIBRATION.md`).
+- **The calibrated cancel rate is an overestimate by construction**
+  (`docs/CALIBRATION.md`).
+- **Not a faithful reimplementation of any published model.** It is a
+  zero-intelligence model in the Farmer/Patelli/Zovko spirit, calibrated to this
+  data, not a reproduction of their specification.
