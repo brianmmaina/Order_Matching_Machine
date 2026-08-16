@@ -100,6 +100,7 @@ if(BUILD_TESTING)
     tests/test_broadcast.cpp
     tests/test_notifier.cpp
     tests/test_wal.cpp
+    tests/test_recovery.cpp
   )
   target_link_libraries(tests PRIVATE order_book ome_warnings GTest::gtest_main Threads::Threads)
 
