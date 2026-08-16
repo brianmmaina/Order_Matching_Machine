@@ -93,6 +93,40 @@ public:
     // determinism instead of a background thread; never used in production.
     std::size_t drain_once() { return drain(); }
 
+    // Rebuilds state from a log, before start().
+    //
+    // THE COMMANDS GO THROUGH apply() — the exact function live traffic uses.
+    // Not a parallel "recovery apply", not a simplified fast path. If replay
+    // used different code, "the recovered book is identical" would be a claim
+    // about two implementations agreeing, which is a much weaker and much more
+    // fragile thing than the same code seeing the same inputs.
+    //
+    // The one difference is that recovery must not emit events: the sessions
+    // those events belong to do not exist yet, and their egress queues are not
+    // registered. That is handled by suppressing emission rather than by
+    // branching inside apply — see replaying_.
+    //
+    // Returns the number of commands applied.
+    std::size_t recover(const std::vector<OrderCommand>& commands) {
+        replaying_ = true;
+        for (const auto& c : commands) {
+            apply(c);
+        }
+        replaying_ = false;
+        // Trades produced during replay were already reflected in the book; the
+        // log would otherwise grow with history nobody will read.
+        engine_.clear_trade_log();
+        recovered_ = commands.size();
+        return recovered_;
+    }
+
+    [[nodiscard]] std::size_t recovered_commands() const noexcept { return recovered_; }
+
+    // The book's canonical fingerprint. Safe to call before start() or after
+    // stop(); calling it while the thread runs is the race this design exists
+    // to prevent.
+    [[nodiscard]] std::uint64_t digest() const { return engine_.book().digest(); }
+
 private:
     void run() {
         while (running_.load(std::memory_order_relaxed)) {
@@ -151,7 +185,9 @@ private:
         // Only state-mutating commands are logged. A SessionOpened or Subscribe
         // describes a connection that will not exist after a restart, and
         // replaying it would produce events for a session that is gone.
-        if (wal_ != nullptr && is_loggable(c.type)) {
+        // Replay must not re-log what it is reading: appending during recovery
+        // would double the log every time the process restarted.
+        if (!replaying_ && wal_ != nullptr && is_loggable(c.type)) {
             if (!wal_->append(c, monotonic_ns())) {
                 // The log is the source of truth for recovery. Applying a
                 // command we failed to record would silently break the
@@ -366,6 +402,9 @@ private:
     // that keeps up sees each of these; one that falls behind has them
     // conflated on the consumer side. See book_snapshot.hpp.
     void publish_book() {
+        if (replaying_) {
+            return;  // nobody is subscribed during recovery
+        }
         if (subscribers_.empty()) {
             return;  // nothing to build, so do not walk the book at all
         }
@@ -472,6 +511,13 @@ private:
     }
 
     void emit(EgressQueue* eg, const OrderEvent& e) {
+        if (replaying_) {
+            // The session this belongs to does not exist yet. Suppressed here,
+            // in one place, rather than by threading a flag through apply() —
+            // which would make the replay path structurally different from the
+            // live one and defeat the point of sharing it.
+            return;
+        }
         if (eg == nullptr) {
             return;  // session already retired; nothing to deliver to
         }
@@ -531,6 +577,9 @@ private:
     Wal* wal_{nullptr};
     std::thread thread_;
     std::atomic<bool> running_{false};
+    // Set only inside recover(), on the calling thread, before start().
+    bool replaying_{false};
+    std::size_t recovered_{0};
 
     std::unordered_map<SessionId, EgressQueue*> egress_;
     std::unordered_map<SessionId, MarketDataQueue*> md_;
