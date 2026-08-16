@@ -208,6 +208,37 @@ and GOOG at a 10-second horizon, and undetectable in INTC and MSFT — the two
 low-priced names, pinned at a one-cent spread, where discrete bounce drowns the
 signal.
 
+## Replicating Farmer, Patelli & Zovko (2005)
+
+[`analysis/farmer2005.py`](analysis/farmer2005.py) tests the two scaling laws
+from [*The predictive power of zero intelligence in financial
+markets*](https://arxiv.org/abs/cond-mat/0309233) (PNAS 102(6):2254–2259)
+against the five LOBSTER symbols. Full writeup in
+[`docs/FARMER_2005.md`](docs/FARMER_2005.md).
+
+The paper predicts a stock's mean spread and price diffusion rate from its
+order flow alone — `ŝ = (μ/α)·f(ε)` — and tests it **cross-sectionally**, by
+regressing `log s = A·log ŝ + B` and asking whether A = 1.
+
+Across all five symbols both laws fail, the diffusion rate by up to four orders
+of magnitude. But the failure is not random: **the error is perfectly
+rank-ordered by `dp/p_c`**, the model's own nondimensional tick size (ρ = 1.000,
+exact p = 0.017 by enumerating all 120 permutations — a rank test rather than a
+regression, because five points cannot support a regression). Equation 1 is
+derived in the limit `dp → 0`, and INTC and MSFT sit at `dp/p_c` of 17 and 22 —
+a penny on a $27 stock is seventeen times the characteristic price scale of its
+own order flow.
+
+Inside the model's stated domain (`dp/p_c < 1`: GOOG, AAPL, AMZN) the spread
+ratio is constant within a factor of 1.5, which is what the law predicts. So
+the paper is not refuted here; it is confirmed in the weak sense five stocks
+allow, and the tick constraint is what a naive replication would have
+misreported as a refutation.
+
+The earlier stylized-facts comparison in
+[`docs/ZI_COMPARISON.md`](docs/ZI_COMPARISON.md) tests properties this paper
+never claims, and says so at the top.
+
 ---
 
 ## Limitations
