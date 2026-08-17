@@ -5,6 +5,7 @@
 > [arXiv:cond-mat/0309233](https://arxiv.org/abs/cond-mat/0309233)
 
 Run it: `python3 analysis/farmer2005.py`
+Charts: `python3 analysis/plot_farmer2005.py` → [`farmer2005.html`](farmer2005.html)
 
 ---
 
@@ -119,6 +120,11 @@ The diffusion regression is the interesting failure: R² = 0.80 with a
 **negative** slope. That is not noise. It is a strong relationship pointing the
 wrong way, which is what a missing control variable looks like.
 
+> **The diffusion column above is measured on the paper's literal A4 clock, and
+> that clock does not match `D̂`'s.** Part of this failure is a unit mismatch
+> rather than a model failure. See *The two diffusion clocks* below — the
+> corrected numbers are smaller and the corrected slope changes sign.
+
 ### The error is ordered by the model's own tick parameter
 
 | | ρ | exact p | n |
@@ -133,6 +139,98 @@ n = 5.
 
 The spread ordering is **not significant** (p = 0.083): GOOG and AAPL swap.
 Stated as a null result, because it is one.
+
+### The two diffusion clocks
+
+Found by auditing my own strongest result before putting it in a paper.
+
+**The paper measures diffusion on a different clock from the one its parameters
+live on.** §A3 defines event time as the count of order placements and
+cancellations, and μ, α, δ are all per event on that clock — so `D̂` is in
+log-price² **per event**. §A4 then says *"here an event is anything that changes
+the midpoint price m"* and measures `V(τ)` over that sequence — so `D` is in
+log-price² **per midpoint change**.
+
+The ratio `D/D̂` therefore carries a hidden factor of events-per-midpoint-change.
+That is harmless when the factor is roughly constant across the sample, which is
+presumably true of the paper's 11 LSE stocks. It is emphatically not true here:
+
+| | dp/p_c | events / midpoint change | raw ratio | matched ratio |
+|---|---:|---:|---:|---:|
+| GOOG | 0.21 | 5.9 | 11.6 | **1.96** |
+| AAPL | 0.35 | 6.0 | 12.6 | **2.11** |
+| AMZN | 0.76 | 9.6 | 93.2 | **9.70** |
+| INTC | 17.30 | 186.3 | 9,386 | **50.37** |
+| MSFT | 22.03 | 158.5 | 20,629 | **130.15** |
+
+**A spread pinned at one tick is a spread whose midpoint rarely moves.** So the
+unit mismatch inflates exactly the stocks the tick already inflates, and a raw
+comparison double counts the same effect.
+
+What changes when the clocks are matched:
+
+| | raw A4 clock | matched |
+|---|---|---|
+| spread of ratios | 1,777× | **66×** |
+| regression slope A | −0.612 (R² = 0.80) | **+0.171** (R² = 0.39) |
+| rank correlation with dp/p_c | ρ = 1.000, p = 0.0167 | **ρ = 1.000, p = 0.0167** |
+
+Three consequences, and the first two are corrections to claims made earlier in
+this repo:
+
+1. **"Diffusion fails by four orders of magnitude" was wrong.** On a matched
+   clock it is closer to two. The extra factor was bookkeeping.
+2. **The dramatic negative slope is substantially an artifact.** Matched, A moves
+   from −0.61 to +0.17. The narrative that a strong wrong-way relationship
+   signalled a missing control variable still holds — the control was real and it
+   was `dp/p_c` — but the specific statistic was inflated.
+3. **The rank result is completely unaffected.** ρ = 1.000 at p = 0.0167 on both
+   clocks.
+
+Point 3 is why the argument was built on a rank test in the first place. The
+statistic that survived a factor-of-27 error in its own input is the one worth
+quoting.
+
+### Intraday error bars
+
+The paper averages parameters over 434 days per stock, which is what gives its
+real side an error bar. LOBSTER's free sample is one day, so the real side above
+is a single observation per stock.
+
+`--blocks 13` cuts the session into 30-minute blocks and re-measures everything
+inside each, in one pass:
+
+| | dp/p_c | ratio (full day) | block mean ± sd | block range |
+|---|---:|---:|---:|---:|
+| GOOG | 0.21 | 4.36 | 4.39 ± 0.88 | 2.70 – 6.00 |
+| AAPL | 0.35 | 3.70 | 3.60 ± 0.44 | 2.84 – 4.60 |
+| AMZN | 0.76 | 5.66 | 6.13 ± 1.77 | 3.45 – 9.49 |
+| INTC | 17.30 | 39.75 | 40.43 ± 5.54 | 28.48 – 49.89 |
+| MSFT | 22.03 | 50.35 | 36.52 ± 10.96 | 25.32 – 55.25 |
+
+**The two regimes do not overlap in any of the 65 block measurements.** The
+small-tick group tops out at 9.49 and the tick-constrained group bottoms out at
+25.32. That separation is a stronger statement than the full-day ratios alone,
+because it survives being re-measured 13 times.
+
+The ordering is also stable: the rank correlation between spread error and
+`dp/p_c` is **positive in 13 of 13 blocks**, ρ = 0.9 in twelve of them and 1.0 in
+one. The persistent ρ = 0.9 rather than 1.0 is the same GOOG/AAPL swap seen over
+the full day, so that swap is a real feature of this sample rather than noise.
+
+**What blocks do and do not buy.** They measure *sampling* variability — is this
+stock's α the same in the second half hour as the ninth? They do **not** measure
+day-to-day variation: overnight gaps, news and regime shifts are invisible inside
+one session, so **these error bars are a lower bound on the true ones**. And
+blocks from a single day are correlated, so "13 of 13" is a consistency check,
+not thirteen independent replications. It answers *is the ordering an artifact of
+one measurement window?* — not *how many sigma is the effect?*
+
+One estimate does shift: MSFT's block mean (36.52) sits well below its full-day
+ratio (50.35). Per-block δ is more heavily censored than the full-day δ, since an
+order outliving its block is dropped rather than credited to a clock it never ran
+on. **The blocks are for variability; the full-session row remains the headline
+estimate.**
 
 ### Inside the stated domain
 
