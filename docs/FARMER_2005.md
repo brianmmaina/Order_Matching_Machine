@@ -251,11 +251,23 @@ so it is not evidence. **The ratio column and the rank test are the evidence.**
 The paper's claim, as conditioned by the paper itself, is **not refuted here**
 — it is confirmed in the weak sense available from five stocks:
 
-1. Across the full sample the laws fail, badly, by up to four orders of
-   magnitude on diffusion.
-2. The failure is **monotonic in `dp/p_c`**, the model's own scope parameter
-   (p = 0.017 for diffusion).
+1. Across the full sample the laws fail badly — spread ratios spanning 3.7 to
+   50, and diffusion ratios spanning 66× on a matched clock. (The raw A4 clock
+   makes diffusion look like 1,777×, but most of that is the unit mismatch
+   described above, not model failure.)
+2. The stocks separate into **two non-overlapping groups** by `dp/p_c`, the
+   model's own scope parameter, and the separation survives being re-measured
+   in all 13 intraday blocks.
 3. Where the scope condition holds, the spread ratio is roughly constant.
+
+On the strength of the evidence: the **two-group separation** in point 2 is the
+robust claim, with 65 non-overlapping block measurements behind it. The rank
+correlation is weaker than it looks — significant for diffusion (ρ = 1.000,
+p = 0.0167) but *not* for spread (ρ = 0.900, p = 0.0833), and at n = 5 the
+smallest attainable p-value is 0.0167 regardless. The ordering *within* the
+small-tick group is not real: GOOG and AAPL swap, persistently and in every
+block. So the defensible statement is that tick-constrained stocks behave
+categorically differently, not that the error is monotonic in `dp/p_c`.
 
 Ignoring the tick parameter turns a scope condition into an apparent
 refutation. That is the substantive lesson, and it is the same mistake in a new
